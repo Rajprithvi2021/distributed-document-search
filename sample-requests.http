@@ -1,0 +1,28 @@
+### Health
+GET http://localhost:8000/health
+
+### Create document
+POST http://localhost:8000/documents
+X-Tenant-ID: tenant-a
+Content-Type: application/json
+
+{
+  "title": "Distributed Search Architecture",
+  "content": "Elasticsearch and Redis support fast distributed document search.",
+  "metadata": {
+    "category": "architecture",
+    "tags": ["search", "distributed-systems"]
+  }
+}
+
+### Search documents
+GET http://localhost:8000/search?q=distributed%20search&page=1&page_size=20
+X-Tenant-ID: tenant-a
+
+### Get document
+GET http://localhost:8000/documents/{{document_id}}
+X-Tenant-ID: tenant-a
+
+### Delete document
+DELETE http://localhost:8000/documents/{{document_id}}
+X-Tenant-ID: tenant-a

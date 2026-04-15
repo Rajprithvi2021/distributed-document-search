@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # ========================================================================
+  # Elasticsearch (Primary data store for documents + metadata)
+  # ========================================================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: docstore-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=changeme
+      - xpack.security.enabled=true
+      - xpack.security.enrollment.enabled=true
+      - xpack.license.self_generated.type=basic
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: curl -s http://elastic:changeme@elasticsearch:9200 >/dev/null || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - docstore-network
+    restart: unless-stopped
+
+  # ========================================================================
+  # Redis
+  # ========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: docstore-redis
+    command: redis-server --appendonly yes --requirepass docpass
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "docpass", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docstore-network
+    restart: unless-stopped
+
+  # ========================================================================
+  # API Service
+  # ========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: docstore-api
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      ELASTICSEARCH_USERNAME: elastic
+      ELASTICSEARCH_PASSWORD: changeme
+      REDIS_URL: redis://:docpass@redis:6379/0
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      DEBUG: "False"
+    ports:
+      - "8000:8000"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - docstore-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health', timeout=3).raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  elasticsearch_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  docstore-network:
+    driver: bridge
