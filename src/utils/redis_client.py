@@ -8,6 +8,7 @@ from redis import Redis, ConnectionPool
 from typing import Any, Optional
 import json
 import logging
+import time
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,9 @@ class RedisClient:
     
     def __init__(self):
         """Initialize Redis client with connection pooling."""
+        self.available = True
+        self.last_failure_at = 0.0
+        self.retry_after_seconds = 5
         try:
             self.pool = ConnectionPool.from_url(
                 settings.redis_url,
@@ -34,14 +38,28 @@ class RedisClient:
         except Exception as e:
             logger.error(f"Failed to initialize Redis client: {str(e)}")
             raise
+
+    def _should_try(self) -> bool:
+        return self.available or (time.time() - self.last_failure_at) >= self.retry_after_seconds
+
+    def _mark_unavailable(self):
+        self.available = False
+        self.last_failure_at = time.time()
+
+    def _mark_available(self):
+        self.available = True
     
     def _verify_connection(self) -> bool:
         """Verify Redis connection."""
+        if not self._should_try():
+            return False
         try:
             self.client.ping()
+            self._mark_available()
             logger.info("Connected to Redis")
             return True
         except Exception as e:
+            self._mark_unavailable()
             logger.warning(f"Redis not available (expected during development): {str(e)}")
             # Don't raise - allow app to load even if Redis isn't running
             return False
@@ -58,6 +76,8 @@ class RedisClient:
         Returns:
             True if successful
         """
+        if not self._should_try():
+            return False
         try:
             ttl = ttl or settings.redis_cache_ttl
             serialized = json.dumps(value) if not isinstance(value, str) else value
@@ -65,6 +85,7 @@ class RedisClient:
             logger.debug(f"Set cache key: {key}")
             return True
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to set cache key {key}: {str(e)}")
             return False
     
@@ -78,6 +99,8 @@ class RedisClient:
         Returns:
             Cached value if found, None otherwise
         """
+        if not self._should_try():
+            return None
         try:
             value = self.client.get(key)
             if value:
@@ -87,6 +110,7 @@ class RedisClient:
                     return value
             return None
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to get cache key {key}: {str(e)}")
             return None
     
@@ -100,11 +124,14 @@ class RedisClient:
         Returns:
             True if key was deleted, False otherwise
         """
+        if not self._should_try():
+            return False
         try:
             result = self.client.delete(key)
             logger.debug(f"Deleted cache key: {key}")
             return bool(result)
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to delete cache key {key}: {str(e)}")
             return False
     
@@ -118,6 +145,8 @@ class RedisClient:
         Returns:
             Number of keys deleted
         """
+        if not self._should_try():
+            return 0
         try:
             keys = self.client.keys(pattern)
             if keys:
@@ -126,6 +155,7 @@ class RedisClient:
                 return count
             return 0
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to delete keys with pattern {pattern}: {str(e)}")
             return 0
     
@@ -140,9 +170,12 @@ class RedisClient:
         Returns:
             New value
         """
+        if not self._should_try():
+            return 0
         try:
             return self.client.incrby(key, amount)
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to increment key {key}: {str(e)}")
             return 0
     
@@ -156,9 +189,12 @@ class RedisClient:
         Returns:
             True if key exists
         """
+        if not self._should_try():
+            return False
         try:
             return bool(self.client.exists(key))
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to check key existence {key}: {str(e)}")
             return False
     
@@ -174,11 +210,14 @@ class RedisClient:
         Returns:
             True if successful
         """
+        if not self._should_try():
+            return False
         try:
             serialized = json.dumps(value) if not isinstance(value, str) else value
             self.client.setex(key, seconds, serialized)
             return True
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to setex key {key}: {str(e)}")
             return False
     
@@ -192,9 +231,12 @@ class RedisClient:
         Returns:
             TTL in seconds (-1 if no expiry, -2 if doesn't exist)
         """
+        if not self._should_try():
+            return -2
         try:
             return self.client.ttl(key)
         except Exception as e:
+            self._mark_unavailable()
             logger.error(f"Failed to get TTL for key {key}: {str(e)}")
             return -2
     
