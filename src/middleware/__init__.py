@@ -21,7 +21,11 @@ class TenantValidationMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         """Validate tenant and add to request state."""
         # Extract tenant_id from header or query parameter
-        tenant_id = request.headers.get("X-Tenant-ID") or request.query_params.get("tenant_id")
+        tenant_id = (
+            request.headers.get("X-Tenant-ID")
+            or request.query_params.get("tenant_id")
+            or request.query_params.get("tenant")
+        )
         
         if not tenant_id and settings.enable_tenant_validation:
             # Allow health check endpoint without tenant

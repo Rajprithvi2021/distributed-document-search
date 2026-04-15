@@ -45,7 +45,7 @@ For local development, the service also keeps a tenant-scoped in-memory fallback
 ### Search Flow
 
 ```text
-GET /search?q=...&tenant_id=...
+GET /search?q=...&tenant=...
   -> validate tenant
   -> apply rate limit
   -> check Redis search cache
@@ -55,7 +55,7 @@ GET /search?q=...&tenant_id=...
   -> return paginated results
 ```
 
-The query targets `title^2` and `content`, with optional fuzzy matching enabled through configuration.
+The query targets `title^2` and `content`, with fuzzy matching enabled through configuration. The prototype also supports highlighted snippets and simple term facets in the local fallback search path.
 
 ### Storage Strategy
 
@@ -65,7 +65,7 @@ The trade-off is eventual consistency for search visibility. That is acceptable 
 
 ### API Design
 
-All tenant-scoped endpoints require `X-Tenant-ID` or `tenant_id`.
+All tenant-scoped endpoints require `X-Tenant-ID`, `tenant_id`, or the assignment-style `tenant` query parameter.
 
 ```http
 POST /documents
@@ -80,8 +80,12 @@ Content-Type: application/json
 ```
 
 ```http
-GET /search?q=distributed%20search&page=1&page_size=20
+GET /search?q=distributed%20search&page=1&page_size=20&facet=category
 X-Tenant-ID: tenant-a
+```
+
+```http
+GET /search?q=distributed%20search&tenant=tenant-a
 ```
 
 ```http
@@ -150,8 +154,8 @@ Implemented assessment features:
 - Per-tenant rate limiting.
 - Dependency-aware health check.
 - Docker Compose for API, Elasticsearch, and Redis.
-- Fuzzy search design and field boosting.
-- Basic performance benchmark notes in existing test reports.
+- Fuzzy search, highlighted snippets, simple metadata facets, and field boosting.
+- Automated API contract tests that exercise all required endpoints and bonus search behavior.
 - Blue-green deployment and cost optimization strategies in production notes.
 
 Run locally:
@@ -171,6 +175,12 @@ Smoke test:
 
 ```bash
 pytest tests/test_required_endpoints.py -q
+```
+
+Full API verification:
+
+```bash
+pytest tests -q
 ```
 
 ## 3. Production Readiness Analysis

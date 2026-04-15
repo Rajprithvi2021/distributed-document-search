@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request, HTTPException, status, Query, Depends
 from datetime import datetime
 import uuid
 import logging
+from typing import Optional
 
 from src.api.schemas import (
     DocumentCreate, DocumentResponse, SearchResponse, 
@@ -244,7 +245,9 @@ async def search(
     q: str = Query(..., min_length=1, description="Search query"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Results per page"),
-    sort_by: str = Query("_score", description="Sort field")
+    sort_by: str = Query("_score", description="Sort field"),
+    include_highlights: bool = Query(True, description="Include highlighted snippets"),
+    facet: Optional[str] = Query(None, description="Metadata/top-level field to facet on")
 ):
     """
     Full-text search across documents.
@@ -265,6 +268,8 @@ async def search(
             page=page,
             page_size=page_size,
             sort_by=sort_by,
+            include_highlights=include_highlights,
+            facet_field=facet,
         )
         logger.info(f"[{request_id}] Search for '{q}': {results['total_results']} results")
         return SearchResponse(**results)

@@ -89,6 +89,7 @@ class SearchResult(BaseModel):
     title: str
     relevance_score: float
     snippet: Optional[str] = None
+    highlights: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]]
 
 
@@ -100,6 +101,7 @@ class SearchResponse(BaseModel):
     page_size: int
     total_pages: int
     results: List[SearchResult]
+    facets: Optional[Dict[str, Dict[str, int]]] = None
     execution_time_ms: float = Field(description="Query execution time in milliseconds")
     
     class Config:

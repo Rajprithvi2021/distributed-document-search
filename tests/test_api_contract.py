@@ -86,6 +86,61 @@ def test_query_validation_errors_are_returned_cleanly():
     assert missing_tenant.json()["error_code"] == "MISSING_TENANT"
 
 
+def test_assignment_tenant_query_parameter_is_supported():
+    tenant_id = tenant()
+    created = client.post(
+        f"/documents?tenant={tenant_id}",
+        json={
+            "title": "Tenant Query Parameter",
+            "content": "The assignment search contract uses tenant as a query parameter.",
+            "metadata": {"category": "contract"},
+        },
+    )
+    assert created.status_code == 201
+
+    searched = client.get(
+        "/search",
+        params={"tenant": tenant_id, "q": "assignment search"},
+    )
+    assert searched.status_code == 200
+    assert searched.json()["total_results"] == 1
+
+
+def test_bonus_fuzzy_highlighting_and_facets_work():
+    tenant_id = tenant()
+    response = client.post(
+        "/documents/bulk",
+        headers={"X-Tenant-ID": tenant_id},
+        json={
+            "documents": [
+                {
+                    "title": "Distributed Search",
+                    "content": "Distributed document search supports highlighted snippets.",
+                    "metadata": {"category": "architecture", "tags": ["search", "redis"]},
+                },
+                {
+                    "title": "Caching Strategy",
+                    "content": "Redis cache keeps search responses fast.",
+                    "metadata": {"category": "performance", "tags": ["search"]},
+                },
+            ]
+        },
+    )
+    assert response.status_code == 201
+
+    search = client.get(
+        "/search",
+        headers={"X-Tenant-ID": tenant_id},
+        params={"q": "distibuted", "facet": "category"},
+    )
+    assert search.status_code == 200
+    body = search.json()
+    assert body["total_results"] >= 1
+    assert body["results"][0]["highlights"] is not None
+    assert "category" in body["facets"]
+    assert body["facets"]["category"]["architecture"] == 1
+
+
 def test_rate_limit_is_applied_per_tenant(monkeypatch):
     tenant_id = tenant()
     _LOCAL_RATE_LIMITS.clear()

@@ -6,6 +6,7 @@ import logging
 import re
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
+from difflib import SequenceMatcher
 from src.utils import es_client, redis_client, logger
 from src.config import settings
 
@@ -37,10 +38,17 @@ def _score_document(document: Dict[str, Any], query_text: str) -> float:
 
     title = document.get("title", "").lower()
     content = document.get("content", "").lower()
+    words = set(re.findall(r"\w+", f"{title} {content}"))
     score = 0.0
     for term in terms:
         score += title.count(term) * 2.0
         score += content.count(term)
+        if settings.enable_fuzzy_search and not title.count(term) and not content.count(term):
+            fuzzy_matches = [
+                word for word in words
+                if len(word) > 3 and SequenceMatcher(None, term, word).ratio() >= 0.82
+            ]
+            score += 0.5 * len(fuzzy_matches)
 
     return score
 
@@ -54,6 +62,44 @@ def _snippet(content: str, query_text: str, size: int = 180) -> str:
             start = max(0, idx - 50)
             return content[start:start + size]
     return content[:size]
+
+
+def _highlights(content: str, query_text: str, size: int = 180) -> List[str]:
+    """Return simple highlighted snippets for matched terms."""
+    snippet = _snippet(content, query_text, size=size)
+    highlighted = snippet
+    matched = False
+    for term in sorted(set(re.findall(r"\w+", query_text)), key=len, reverse=True):
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+        if pattern.search(highlighted):
+            matched = True
+            highlighted = pattern.sub(lambda match: f"<em>{match.group(0)}</em>", highlighted)
+    return [highlighted] if matched else []
+
+
+def _facet_value(document: Dict[str, Any], facet_field: str) -> Any:
+    """Read a facet value from document metadata first, then top-level fields."""
+    metadata = document.get("metadata") or {}
+    if facet_field in metadata:
+        return metadata[facet_field]
+    return document.get(facet_field)
+
+
+def _build_facets(documents: List[Dict[str, Any]], facet_field: Optional[str]) -> Optional[Dict[str, Dict[str, int]]]:
+    """Build simple term facets for the local prototype fallback."""
+    if not facet_field:
+        return None
+
+    counts: Dict[str, int] = {}
+    for document in documents:
+        value = _facet_value(document, facet_field)
+        if value is None:
+            continue
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            counts[str(item)] = counts.get(str(item), 0) + 1
+
+    return {facet_field: counts}
 
 
 class TenantService:
@@ -238,7 +284,8 @@ class SearchService:
     
     @staticmethod
     def search(tenant_id: str, query_text: str, page: int = 1, page_size: int = 20,
-               filters: Optional[Dict[str, Any]] = None, sort_by: str = "_score") -> Dict[str, Any]:
+               filters: Optional[Dict[str, Any]] = None, sort_by: str = "_score",
+               include_highlights: bool = True, facet_field: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute search query.
         
@@ -254,7 +301,7 @@ class SearchService:
             Search results with metadata
         """
         # Check cache for query
-        cache_key = f"search:{tenant_id}:{hash(query_text)}:{page}:{page_size}"
+        cache_key = f"search:{tenant_id}:{hash(query_text)}:{page}:{page_size}:{include_highlights}:{facet_field}"
         if cached := redis_client.get(cache_key):
             logger.debug(f"Cache hit for search query: {cache_key}")
             return cached
@@ -296,6 +343,8 @@ class SearchService:
                     page_size=page_size,
                     started_at=start_time,
                     cache_key=cache_key,
+                    include_highlights=include_highlights,
+                    facet_field=facet_field,
                 )
             
             search_results = {
@@ -310,10 +359,12 @@ class SearchService:
                         "title": hit["_source"].get("title", ""),
                         "relevance_score": float(hit.get("_score", 0)),
                         "snippet": hit["_source"].get("content", "")[:200],
+                        "highlights": hit.get("highlight", {}).get("content"),
                         "metadata": hit["_source"].get("metadata")
                     }
                     for hit in es_hits
                 ],
+                "facets": None,
                 "execution_time_ms": duration_ms
             }
             
@@ -333,6 +384,8 @@ class SearchService:
                 page_size=page_size,
                 started_at=datetime.utcnow(),
                 cache_key=cache_key,
+                include_highlights=include_highlights,
+                facet_field=facet_field,
             )
 
     @staticmethod
@@ -343,6 +396,8 @@ class SearchService:
         page_size: int,
         started_at: datetime,
         cache_key: str,
+        include_highlights: bool = True,
+        facet_field: Optional[str] = None,
     ) -> Dict[str, Any]:
         scored = []
         for document in _tenant_docs(tenant_id).values():
@@ -356,6 +411,7 @@ class SearchService:
         total_hits = len(scored)
         start = (page - 1) * page_size
         paged = scored[start:start + page_size]
+        matched_documents = [document for _, document in scored]
         duration_ms = (datetime.utcnow() - started_at).total_seconds() * 1000
 
         search_results = {
@@ -370,10 +426,13 @@ class SearchService:
                     "title": document.get("title", ""),
                     "relevance_score": float(score),
                     "snippet": _snippet(document.get("content", ""), query_text),
+                    "highlights": _highlights(document.get("content", ""), query_text)
+                    if include_highlights else None,
                     "metadata": document.get("metadata"),
                 }
                 for score, document in paged
             ],
+            "facets": _build_facets(matched_documents, facet_field),
             "execution_time_ms": duration_ms,
         }
 
