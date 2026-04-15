@@ -438,17 +438,3 @@ See `docs/` directory for detailed information:
 - [Redis Documentation](https://redis.io/documentation)
 - [Docker Documentation](https://docs.docker.com/)
 
-## 📝 License
-
-MIT License - See LICENSE file for details
-
-## 👥 Contributing
-
-Contributions are welcome! Please see CONTRIBUTING.md for guidelines.
-
-## 📞 Support
-
-For issues, questions, or suggestions:
-- Create a GitHub issue
-- Check existing documentation
-- Review API documentation at `/docs`
