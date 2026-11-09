@@ -1,28 +1,56 @@
-### Health
-GET http://localhost:8000/health
+# VS Code REST Client / JetBrains HTTP client samples. Run top to bottom.
+@baseUrl = http://localhost:8000
+@tenant = tenant-a
 
-### Create document
-POST http://localhost:8000/documents
-X-Tenant-ID: tenant-a
+### Health with dependency status
+GET {{baseUrl}}/health
+
+### Index a new document
+# @name create
+POST {{baseUrl}}/documents
+X-Tenant-ID: {{tenant}}
 Content-Type: application/json
+Idempotency-Key: demo-create-1
 
 {
-  "title": "Distributed Search Architecture",
-  "content": "Elasticsearch and Redis support fast distributed document search.",
-  "metadata": {
-    "category": "architecture",
-    "tags": ["search", "distributed-systems"]
-  }
+  "title": "Distributed search architecture",
+  "content": "Elasticsearch shards the inverted index; Redis caches hot queries.",
+  "tags": ["architecture", "search"],
+  "metadata": {"category": "engineering", "year": 2024}
 }
 
-### Search documents
-GET http://localhost:8000/search?q=distributed%20search&page=1&page_size=20
-X-Tenant-ID: tenant-a
+### Search (assignment contract)
+GET {{baseUrl}}/search?q=distributed%20search&tenant={{tenant}}
 
-### Get document
-GET http://localhost:8000/documents/{{document_id}}
-X-Tenant-ID: tenant-a
+### Search with facets, filters, sort and highlighting
+GET {{baseUrl}}/search?q=search&facets=tags,metadata.category&filter=category:engineering&sort=newest&page=1&page_size=10
+X-Tenant-ID: {{tenant}}
 
-### Delete document
-DELETE http://localhost:8000/documents/{{document_id}}
-X-Tenant-ID: tenant-a
+### Typo-tolerant search (fuzzy=auto falls back to fuzzy only when exact finds nothing)
+GET {{baseUrl}}/search?q=distibuted
+X-Tenant-ID: {{tenant}}
+
+### Retrieve document details
+GET {{baseUrl}}/documents/{{create.response.body.id}}
+X-Tenant-ID: {{tenant}}
+
+### Tenant isolation: another tenant gets 404
+GET {{baseUrl}}/documents/{{create.response.body.id}}
+X-Tenant-ID: tenant-b
+
+### Remove a document
+DELETE {{baseUrl}}/documents/{{create.response.body.id}}
+X-Tenant-ID: {{tenant}}
+
+### Bulk index
+POST {{baseUrl}}/documents/bulk
+X-Tenant-ID: {{tenant}}
+Content-Type: application/json
+
+{"documents": [
+  {"title": "Caching strategy", "content": "Redis keeps distributed search responses fast.", "tags": ["performance"]},
+  {"title": "Incident review", "content": "Circuit breakers stopped a cascading failure.", "tags": ["operations"]}
+]}
+
+### Prometheus metrics
+GET {{baseUrl}}/metrics

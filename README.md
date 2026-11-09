@@ -1,440 +1,120 @@
 # Distributed Document Search Service
 
-> Assessment reviewer note: the authoritative, concise submission document is
-> `ASSESSMENT_SUBMISSION.md`. Some older report files are retained as optional
-> supporting notes, but the runnable prototype is the FastAPI + Elasticsearch +
-> Redis Docker Compose stack described below.
+Multi-tenant full-text search API: **FastAPI + Elasticsearch + Redis**, built to show enterprise patterns such as tenant isolation, layered caching, per-tenant rate limiting, async indexing through a queue, circuit breakers and zero-downtime deployment.
 
-A production-grade prototype of an enterprise document search service demonstrating architectural best practices for scalability, fault tolerance, and multi-tenancy.
+> 📄 **Reviewers: start with [`SUBMISSION.md`](SUBMISSION.md).** It is the single document with the architecture design, production-readiness analysis, experience showcase and AI-usage note.
+> The gap analysis of the original prototype and the build plan are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-## 🎯 Project Overview
+| | |
+|---|---|
+| Required endpoints | `POST /documents` · `GET /search?q=&tenant=` · `GET /documents/{id}` · `DELETE /documents/{id}` · `GET /health` |
+| Extras | bulk indexing, async indexing (202 + Redis Streams + worker + DLQ), fuzzy / faceted / highlighted search, idempotency keys, API-key & JWT auth with scopes, Prometheus metrics, readiness/liveness |
+| Quality | 161 tests (unit + HTTP integration), **94% coverage**, ruff-clean; plus 17 live tests against real Elasticsearch/Redis (all passing); verified as a 2-replica deployment behind nginx, including failover and a zero-downtime blue-green switch; CI runs the tests and the full `docker compose` stack end to end |
+| Docs | [Submission (architecture, production readiness)](SUBMISSION.md) · [Extended architecture & decision records](docs/ARCHITECTURE.md) · [API reference](docs/API.md) · [Benchmarks](docs/BENCHMARKS.md) · [Deployment & blue-green](docs/DEPLOYMENT.md) |
 
-This service is designed to:
-- Handle 10+ million documents across multiple tenants
-- Support full-text search with relevance ranking
-- Return results in under 500ms for 95th percentile queries
-- Support 1000+ concurrent searches per second
-- Provide tenant isolation and security
-- Scale horizontally as document volume grows
+## Quick start
 
-## 📋 Tech Stack
-
-- **Language**: Python 3.11+
-- **Framework**: FastAPI (async, OpenAPI documentation)
-- **Search Engine**: Elasticsearch 8.11 (full-text search + document storage)
-- **Cache**: Redis 7 (distributed caching, rate limiting)
-- **Containerization**: Docker & Docker Compose
-
-### Why This Stack?
-
-- **Elasticsearch as Single Source of Truth**: Stores documents with full metadata (no separate database needed)
-- **Redis for Performance**: Caches frequent queries and manages rate limits
-- **FastAPI Background Tasks**: Handles async operations without needing RabbitMQ
-- **Simpler, Faster**: 3 services instead of 5, 30% faster setup, easier to understand
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Docker & Docker Compose
-- Python 3.11+ (for local development)
-- Git
-
-### Docker Compose Setup (Recommended)
+**Option A: full stack (Docker).** nginx gateway → 2 API replicas → Elasticsearch 8 + Redis 7, plus an indexing worker.
 
 ```bash
-# Clone or navigate to project
-cd distributed-document-search
-
-# Build and start all services
-docker-compose up -d
-
-# Verify all services are running
-docker-compose ps
-
-# Check health
+docker compose up --build -d
 curl http://localhost:8000/health
+bash scripts/smoke_test.sh            # Windows: powershell -File scripts\smoke_test.ps1
 ```
 
-All services will be available at:
-- **API**: http://localhost:8000
-- **API Docs**: http://localhost:8000/docs
-- **Elasticsearch**: http://localhost:9200 (user: elastic, pass: changeme)
-- **Redis**: localhost:6379 (password: docpass)
-
-### Local Development Setup
+**Option B: no dependencies (in-memory adapters).** Useful for a 30-second look and for development.
 
 ```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Copy and configure environment
-cp .env.example .env
-# Edit .env with your settings
-
-# Start external services (Elasticsearch, Redis only)
-docker-compose up elasticsearch redis -d
-
-# Run application
-python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
+uvicorn app.main:app --reload                      # http://localhost:8000/docs
 ```
 
-## 📖 API Documentation
-
-### Interactive API Docs
-Visit http://localhost:8000/docs for interactive Swagger UI documentation.
-
-### Authentication
-All endpoints require tenant identification:
+**Run the tests**
 
 ```bash
-# Header approach (recommended)
-curl -H "X-Tenant-ID: tenant-123" http://localhost:8000/documents
+pytest                                  # 161 tests, ~5 s, no Docker needed (live tests auto-skip)
+pytest --cov=app --cov-report=term      # coverage
+ruff check app tests scripts            # lint
 
-# Query parameter approach
-curl "http://localhost:8000/documents?tenant_id=tenant-123"
+# live tests against real engines (e.g. the compose stack's ES/Redis with security off, or CI services)
+ES_TEST_URL=http://localhost:9200 REDIS_TEST_URL=redis://localhost:6379/0 pytest tests/live -v
 ```
 
-### Core Endpoints
+## Try it
 
-#### 1. Health Check
 ```bash
-curl http://localhost:8000/health
+# index
+curl -s -X POST localhost:8000/documents -H 'X-Tenant-ID: acme' -H 'Content-Type: application/json' \
+  -d '{"title":"Distributed search","content":"Elasticsearch shards the index; Redis caches hot queries.","tags":["arch"],"metadata":{"category":"eng"}}'
+
+# search: the assignment contract (tenant as a query parameter)
+curl -s 'localhost:8000/search?q=distributed%20search&tenant=acme'
+
+# facets, filters, typo tolerance (fuzzy=auto kicks in when the exact query finds nothing)
+curl -s 'localhost:8000/search?q=distibuted&facets=tags,metadata.category&filter=category:eng' -H 'X-Tenant-ID: acme'
+
+# get / delete (another tenant gets 404: isolation)
+curl -s localhost:8000/documents/<id> -H 'X-Tenant-ID: acme'
+curl -s -X DELETE localhost:8000/documents/<id> -H 'X-Tenant-ID: acme' -o /dev/null -w '%{http_code}\n'
 ```
 
-**Response:**
-```json
-{
-  "status": "healthy",
-  "version": "1.0.0",
-  "dependencies": {
-    "postgresql": {"status": "healthy"},
-    "elasticsearch": {"status": "healthy", "version": "8.11.0"},
-    "redis": {"status": "healthy"}
-  },
-  "timestamp": "2024-01-15T10:30:00Z"
-}
-```
+There's also a [Postman collection](postman/document-search.postman_collection.json) (with tests; run it with the Collection Runner) and [`sample-requests.http`](sample-requests.http).
 
-#### 2. Create Document
-```bash
-curl -X POST http://localhost:8000/documents \
-  -H "Content-Type: application/json" \
-  -H "X-Tenant-ID: tenant-123" \
-  -d '{
-    "title": "Introduction to Distributed Systems",
-    "content": "Distributed systems are computer systems whose components are located on different networked computers...",
-    "metadata": {
-      "author": "John Doe",
-      "category": "technology",
-      "tags": ["distributed", "systems"]
-    }
-  }'
-```
-
-**Response:**
-```json
-{
-  "document_id": "550e8400-e29b-41d4-a716-446655440000",
-  "title": "Introduction to Distributed Systems",
-  "content": "Distributed systems are computer systems...",
-  "status": "active",
-  "tenant_id": "tenant-123",
-  "indexed": true,
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-15T10:30:00Z",
-  "created_by": "system",
-  "metadata": {
-    "author": "John Doe",
-    "category": "technology"
-  }
-}
-```
-
-#### 3. Bulk Create Documents
-```bash
-curl -X POST http://localhost:8000/documents/bulk \
-  -H "Content-Type: application/json" \
-  -H "X-Tenant-ID: tenant-123" \
-  -d '{
-    "documents": [
-      {
-        "title": "Document 1",
-        "content": "Content 1..."
-      },
-      {
-        "title": "Document 2",
-        "content": "Content 2..."
-      }
-    ]
-  }'
-```
-
-#### 4. Search Documents
-```bash
-curl "http://localhost:8000/search?q=distributed%20systems&page=1&page_size=20" \
-  -H "X-Tenant-ID: tenant-123"
-```
-
-**Response:**
-```json
-{
-  "query": "distributed systems",
-  "total_results": 42,
-  "page": 1,
-  "page_size": 20,
-  "total_pages": 3,
-  "results": [
-    {
-      "document_id": "550e8400-e29b-41d4-a716-446655440000",
-      "title": "Introduction to Distributed Systems",
-      "relevance_score": 0.95,
-      "snippet": "Distributed systems are computer systems whose components are...",
-      "metadata": {
-        "author": "John Doe",
-        "category": "technology"
-      }
-    },
-    {
-      "document_id": "550e8400-e29b-41d4-a716-446655440001",
-      "title": "Building Scalable Systems",
-      "relevance_score": 0.87,
-      "snippet": "When building distributed systems at scale...",
-      "metadata": null
-    }
-  ],
-  "execution_time_ms": 124.5
-}
-```
-
-#### 5. Get Document Details
-```bash
-curl "http://localhost:8000/documents/550e8400-e29b-41d4-a716-446655440000" \
-  -H "X-Tenant-ID: tenant-123"
-```
-
-#### 6. Delete Document
-```bash
-curl -X DELETE "http://localhost:8000/documents/550e8400-e29b-41d4-a716-446655440000" \
-  -H "X-Tenant-ID: tenant-123"
-```
-
-### Rate Limiting
-
-Rate limits are applied per tenant:
-- **Default**: 1000 requests per 60 seconds
-- **Headers**: 
-  - `X-Rate-Limit-Limit`: Total requests allowed
-  - `X-Rate-Limit-Remaining`: Requests remaining in current window
-  - `X-Rate-Limit-Reset`: Unix timestamp when limit resets
-
-Example rate-limit response header:
-```
-X-Rate-Limit-Limit: 1000
-X-Rate-Limit-Remaining: 999
-X-Rate-Limit-Reset: 1705318260
-```
-
-## 🏗️ Architecture Overview
-
-### System Components
+## How it's built
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Client Requests                         │
-└────────────────────────────┬────────────────────────────────┘
-                             │
-              ┌──────────────┴──────────────┐
-              │                             │
-         ┌────▼──────┐            ┌────────▼─────┐
-         │    API    │            │   Load       │
-         │  Service  │            │   Balancer   │
-         │ (FastAPI) │            │   (Nginx)    │
-         └────┬──────┘            └──────────────┘
-              │
-      ┌───────┼────────┐
-      │       │        │
-  ┌───▼──┐ ┌─▼───┐ ┌──▼────┐
-  │ Rate │ │Auth │ │Logging │
-  │Limit │ │     │ │        │
-  └───┬──┘ └─┬───┘ └──┬─────┘
-      │      │       │
-  ┌───┴──────┴───────┴───┬──────────────────┐
-  │                      │                  │
-┌─▼────────────┐  ┌─────▼──────┐  ┌────────▼────┐
-│  PostgreSQL  │  │Elasticsearch│  │    Redis    │
-│  (Metadata,  │  │ (Full-text  │  │   (Cache,   │
-│   Tenant     │  │   search,   │  │ Rate limit, │
-│  isolation)  │  │   indexing) │  │   session)  │
-└──────────────┘  └─────────────┘  └─────────────┘
-  │                    │ (Optional)
-  │                    │
-  └────────────────┬───┘
-                   │
-            ┌──────▼──────┐
-            │   RabbitMQ  │
-            │  (Async     │
-            │  indexing,  │
-            │  events)    │
-            └─────────────┘
+app/
+├── main.py            app factory: routers, middleware, lifespan
+├── config.py          typed settings, validated (e.g. header auth refused in production)
+├── container.py       composition root: the only place concrete adapters are chosen
+├── api/               HTTP layer: schemas, dependencies (auth → rate limit → scope), error envelope, routes/
+├── core/              errors, JSON logging, Prometheus metrics, circuit breaker + retry, authentication
+├── domain/            framework-free models (Document, SearchQuery, SearchPage)
+├── search/            SearchBackend port → elasticsearch.py (prod) · memory.py (BM25 dev/test) · resilient.py
+├── cache/             Cache port → memory · redis · tiered L1/L2 · guarded (breaker) · search/document stores
+├── ratelimit/         token bucket → atomic Redis Lua (shared) · in-memory (fallback)
+├── queue/             IndexingQueue port → Redis Streams (consumer group, XAUTOCLAIM, DLQ) · in-memory
+├── services/          use cases: documents, search (single-flight, stale-if-error), health
+├── workers/indexer.py async indexing worker (python -m app.workers.indexer)
+└── middleware/        pure ASGI: request ID, access log, RED metrics, security headers, body limit
+tests/unit · tests/integration · tests/live (real ES/Redis)    scripts/ (smoke, seed, benchmark, JWT)    deploy/ (nginx, blue-green, k8s)
 ```
 
-### Data Flow
+Key behaviours, each covered by tests:
 
-#### Indexing Flow
-```
-Client -> API -> Database -> Elasticsearch -> Cache (Redis)
-                    ↓
-              Audit Logging
-```
+| Concern | Behaviour |
+|---|---|
+| Tenant isolation | Tenant validated (`^[a-z0-9][a-z0-9_-]{0,62}$`) and applied to index/alias, query filter, GET verification, cache keys and rate-limit buckets |
+| Writes | Never acknowledged unless stored (503 otherwise); `Idempotency-Key` replays; async mode returns 202 and is readable by id immediately |
+| Search | BM25, `title^2`, phrase boost, filters, sort, facets, HTML-safe highlights, `fuzzy=auto`, deep-paging guard |
+| Caching | L1 (2 s) → Redis L2; O(1) per-tenant invalidation via generation counters; single-flight; stale-if-error |
+| Rate limiting | Per-tenant token bucket (burst + sustained), atomic in Redis, per-tenant overrides, local fallback if Redis is down |
+| Failure handling | Circuit breakers + jittered retries; Redis outage → still serving; ES outage → stale results or a clean 503; `/health` → 503 for readiness |
 
-#### Search Flow
-```
-Client -> API -> Cache Check (Redis)
-                    ↓ (miss)
-                Elasticsearch -> Format Results -> Cache -> Client
-```
+## Configuration
 
-### Multi-Tenancy Isolation
-- **Row-Level Isolation**: tenant_id field in all tables
-- **Index-Level Isolation**: Separate Elasticsearch indices per tenant
-- **Query Filtering**: All queries filtered by tenant_id
-- **Cache Namespacing**: Cache keys include tenant_id
+All settings are environment variables (see [`.env.example`](.env.example) and `app/config.py`). The important ones:
 
-## 📊 Performance Characteristics
+| Variable | Default | Values |
+|---|---|---|
+| `SEARCH_BACKEND` | `memory` | `elasticsearch` · `memory` |
+| `STATE_BACKEND` | `memory` | `redis` · `memory` (cache, rate limits, queue) |
+| `ELASTICSEARCH_TENANCY` | `index_per_tenant` | `index_per_tenant` · `shared_index` (routing by tenant) |
+| `ELASTICSEARCH_REFRESH` | `false` | `false` (≈1 s eventual) · `wait_for` (read-your-writes) |
+| `INDEXING_MODE` | `sync` | `sync` (201) · `async` (202 + queue + worker) |
+| `AUTH_MODE` | `header` | `header` · `api_key` (`API_KEYS`) · `jwt` (`JWT_SECRET`) |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` / `RATE_LIMIT_BURST` | 600 / 100 | per tenant; `RATE_LIMIT_OVERRIDES='{"tenant":rpm}'` |
+| `CACHE_SEARCH_TTL_S` / `CACHE_SEARCH_STALE_TTL_S` / `CACHE_LOCAL_TTL_S` | 60 / 600 / 2 | |
 
-### Caching Strategy
-1. **L1**: Redis distributed cache
-   - Query result caching (5-minute TTL)
-   - Document metadata caching (1-hour TTL)
-   - Rate limit counters
+## Benchmarks (from this prototype)
 
-2. **L2**: Application in-memory cache (optional)
-   - Tenant validation cache (1-hour TTL)
-   - Index metadata cache
+One API process against **real Elasticsearch 8.15.3**, all on one laptop (i5-1135G7). Full method, the in-memory comparison and an outage/recovery test are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-3. **L3**: Elasticsearch query caching
-   - Built-in query result caching
+| Workload (concurrency 8) | req/s | p50 | p95 | cache hit |
+|---|---:|---:|---:|---:|
+| Cache-miss search | 314 | 25 ms | 32 ms | 0% |
+| Popular-query search | 752 | 8 ms | 25 ms | 93% |
+| Bulk indexing | 1,070 docs/s | | | |
 
-### Index Strategy
-- **Number of Shards**: 3 (configurable based on data volume)
-- **Replicas**: 1 (configurable for HA)
-- **Analyzers**: Standard English analyzer with stopwords
-- **Field Mapping**: title (boosted 2x), content, metadata
-
-## 🔒 Security Features
-
-### Current Implementation
-- ✅ Multi-tenant isolation with tenant_id validation
-- ✅ Rate limiting per tenant
-- ✅ Request logging and tracking
-- ⚠️ Basic error handling
-
-### Production Enhancements Needed
-- [ ] JWT authentication
-- [ ] RBAC (Role-Based Access Control)
-- [ ] API key management
-- [ ] Encryption at rest (Elasticsearch)
-- [ ] TLS/mTLS for service communication
-- [ ] Input validation and sanitization
-- [ ] SQL injection prevention (using SQLAlchemy)
-- [ ] CORS configuration per environment
-- [ ] Audit logging integration
-- [ ] Secrets management (HashiCorp Vault, AWS Secrets Manager)
-
-## 🧪 Testing
-
-### Run Tests
-```bash
-# Install test dependencies
-pip install -r requirements.txt
-
-# Run all tests
-pytest tests/
-
-# Run with coverage
-pytest tests/ --cov=src --cov-report=html
-
-# Run specific test file
-pytest tests/unit/test_search_service.py -v
-
-# Run integration tests
-pytest tests/integration/ -v
-```
-
-### Test Structure
-```
-tests/
-├── unit/
-│   ├── test_search_service.py
-│   ├── test_rate_limiting.py
-│   └── test_tenant_isolation.py
-└── integration/
-    ├── test_api_endpoints.py
-    └── test_es_integration.py
-```
-
-## 📈 Monitoring
-
-### Health Checks
-- API: `GET /health` - Complete dependency status
-- PostgreSQL: Connection pool status
-- Elasticsearch: Cluster health and version
-- Redis: Ping connectivity
-
-### Metrics
-- Request count, error rate, latency
-- Cache hit/miss ratios
-- Index size and document count
-- Query execution times
-
-### Logging
-- JSON-formatted logs (production-ready)
-- Request ID tracking across distributed calls
-- Structured context (tenant_id, duration_ms, etc.)
-- Log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
-
-## 🚢 Deployment
-
-### Docker Deployment
-```bash
-# Build images
-docker-compose build
-
-# Start services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f api
-
-# Scale API service (with load balancer)
-docker-compose up -d --scale api=3
-```
-
-### Production Considerations
-- Use environment-specific `.env` files
-- Configure secrets management for credentials
-- Set up log aggregation (ELK Stack, CloudWatch, etc.)
-- Implement monitoring and alerting
-- Set up backup and disaster recovery procedures
-- Use managed services (RDS, ElasticSearch Service, etc.)
-
-## 📚 Documentation Files
-
-See `docs/` directory for detailed information:
-- `ARCHITECTURE.md` - Detailed architecture design
-- `API.md` - Complete API contract
-- `PRODUCTION_READINESS.md` - Scale and resilience strategies
-- `SETUP.md` - Comprehensive setup guide
-
-## 🔗 Additional Resources
-
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [Elasticsearch Documentation](https://www.elastic.co/guide/en/elasticsearch/reference/current/index.html)
-- [PostgreSQL Documentation](https://www.postgresql.org/docs/)
-- [Redis Documentation](https://redis.io/documentation)
-- [Docker Documentation](https://docs.docker.com/)
-
+p95 stays under 500 ms at concurrency 1, 8 and 32, with 0 errors in 15,000 requests.

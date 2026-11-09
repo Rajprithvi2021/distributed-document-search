@@ -1,0 +1,122 @@
+{
+  "info": {
+    "name": "Distributed Document Search",
+    "description": "Required endpoints plus bonus features. Run the folder in order with the Collection Runner: every request has tests, and 'Create document' stores {{documentId}} for the following requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "tenant", "value": "tenant-a" },
+    { "key": "otherTenant", "value": "tenant-b" },
+    { "key": "documentId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health check (dependency status)",
+      "request": { "method": "GET", "url": "{{baseUrl}}/health" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200 healthy/degraded', () => pm.expect(pm.response.code).to.eql(200));",
+        "pm.test('reports dependencies', () => pm.expect(pm.response.json().dependencies).to.have.property('search'));"
+      ] } }]
+    },
+    {
+      "name": "Create document",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-Tenant-ID", "value": "{{tenant}}" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "{{$guid}}" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"title\": \"Distributed search architecture\",\n  \"content\": \"Elasticsearch shards the inverted index; Redis caches hot queries.\",\n  \"tags\": [\"architecture\", \"search\"],\n  \"metadata\": {\"category\": \"engineering\", \"year\": 2024}\n}" },
+        "url": "{{baseUrl}}/documents"
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('201 Created (or 202 in async mode)', () => pm.expect(pm.response.code).to.be.oneOf([201, 202]));",
+        "pm.collectionVariables.set('documentId', pm.response.json().id);"
+      ] } }]
+    },
+    {
+      "name": "Bulk create documents",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Tenant-ID", "value": "{{tenant}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"documents\": [\n    {\"title\": \"Caching strategy\", \"content\": \"Redis keeps distributed search responses fast.\", \"tags\": [\"performance\"], \"metadata\": {\"category\": \"engineering\"}},\n    {\"title\": \"Incident review\", \"content\": \"Circuit breakers stopped a cascading failure.\", \"tags\": [\"operations\"], \"metadata\": {\"category\": \"operations\"}}\n  ]\n}" },
+        "url": "{{baseUrl}}/documents/bulk"
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('bulk accepted', () => pm.expect(pm.response.code).to.be.oneOf([201, 202]));",
+        "pm.test('no failures', () => pm.expect(pm.response.json().failed).to.eql(0));"
+      ] } }]
+    },
+    {
+      "name": "Search (assignment contract: ?q=&tenant=)",
+      "request": { "method": "GET", "url": "{{baseUrl}}/search?q=distributed%20search&tenant={{tenant}}" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200', () => pm.expect(pm.response.code).to.eql(200));",
+        "pm.test('ranked results', () => pm.expect(pm.response.json().total).to.be.above(0));"
+      ] } }]
+    },
+    {
+      "name": "Search with facets, filters, highlighting",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "X-Tenant-ID", "value": "{{tenant}}" }],
+        "url": "{{baseUrl}}/search?q=search&facets=tags,metadata.category&filter=category:engineering&highlight=true&page_size=5"
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('facets returned', () => pm.expect(pm.response.json().facets).to.have.property('tags'));"
+      ] } }]
+    },
+    {
+      "name": "Search with a typo (fuzzy auto)",
+      "request": { "method": "GET", "header": [{ "key": "X-Tenant-ID", "value": "{{tenant}}" }], "url": "{{baseUrl}}/search?q=distibuted" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('typo tolerated', () => pm.expect(pm.response.json().fuzzy_applied).to.eql(true));"
+      ] } }]
+    },
+    {
+      "name": "Get document",
+      "request": { "method": "GET", "header": [{ "key": "X-Tenant-ID", "value": "{{tenant}}" }], "url": "{{baseUrl}}/documents/{{documentId}}" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200', () => pm.expect(pm.response.code).to.eql(200));",
+        "pm.test('same document', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('documentId')));"
+      ] } }]
+    },
+    {
+      "name": "Get document as another tenant (isolation)",
+      "request": { "method": "GET", "header": [{ "key": "X-Tenant-ID", "value": "{{otherTenant}}" }], "url": "{{baseUrl}}/documents/{{documentId}}" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('404 for other tenant', () => pm.expect(pm.response.code).to.eql(404));"
+      ] } }]
+    },
+    {
+      "name": "Missing tenant (400)",
+      "request": { "method": "GET", "url": "{{baseUrl}}/search?q=anything" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('400 MISSING_TENANT', () => pm.expect(pm.response.json().error.code).to.eql('MISSING_TENANT'));"
+      ] } }]
+    },
+    {
+      "name": "Delete document",
+      "request": { "method": "DELETE", "header": [{ "key": "X-Tenant-ID", "value": "{{tenant}}" }], "url": "{{baseUrl}}/documents/{{documentId}}" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('204', () => pm.expect(pm.response.code).to.eql(204));"
+      ] } }]
+    },
+    {
+      "name": "Get deleted document (404)",
+      "request": { "method": "GET", "header": [{ "key": "X-Tenant-ID", "value": "{{tenant}}" }], "url": "{{baseUrl}}/documents/{{documentId}}" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('404', () => pm.expect(pm.response.code).to.eql(404));"
+      ] } }]
+    },
+    {
+      "name": "Prometheus metrics",
+      "request": { "method": "GET", "url": "{{baseUrl}}/metrics" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('exposition format', () => pm.expect(pm.response.text()).to.include('http_requests_total'));"
+      ] } }]
+    }
+  ]
+}

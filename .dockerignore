@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.coverage
+htmlcov
+.env
+tests
+docs
+deploy
+postman
+scripts
+*.md

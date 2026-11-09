@@ -1,0 +1,67 @@
+# Blue colour of the API. api-green.yaml is identical except for `color` and the image tag.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docsearch-api-blue
+  namespace: docsearch
+  labels: { app: docsearch-api, color: blue }
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: docsearch-api, color: blue }
+  template:
+    metadata:
+      labels: { app: docsearch-api, color: blue }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001 }
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: docsearch-api, color: blue }
+      containers:
+        - name: api
+          image: registry.example.com/docsearch-api:2.0.0
+          ports: [{ containerPort: 8000, name: http }]
+          envFrom:
+            - configMapRef: { name: docsearch-config }
+            - secretRef: { name: docsearch-secrets }
+          env:
+            - { name: WEB_CONCURRENCY, value: "2" }
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          lifecycle:
+            # Give the load balancer time to drop the pod before uvicorn starts draining.
+            preStop: { exec: { command: ["sleep", "5"] } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: docsearch-api-blue
+  namespace: docsearch
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: docsearch-api-blue }
+  minReplicas: 3
+  maxReplicas: 30
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 65 } }

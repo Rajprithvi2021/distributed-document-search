@@ -1,89 +1,110 @@
-version: '3.8'
+# Full stack: nginx gateway -> 2 stateless API replicas -> Elasticsearch + Redis, plus an indexing worker.
+#   docker compose up --build -d
+#   curl http://localhost:8000/health
+# Async indexing (202 + Redis Streams + worker):  INDEXING_MODE=async docker compose up --build -d
+name: docsearch
+
+x-app-env: &app-env
+  ENVIRONMENT: development
+  LOG_JSON: "true"
+  SEARCH_BACKEND: elasticsearch
+  STATE_BACKEND: redis
+  ELASTICSEARCH_URL: http://elasticsearch:9200
+  ELASTICSEARCH_USERNAME: elastic
+  ELASTICSEARCH_PASSWORD: ${ELASTIC_PASSWORD:-change-me-elastic}
+  # Demo-friendly read-your-writes for search; production default is "false" (≈1 s refresh).
+  ELASTICSEARCH_REFRESH: ${ELASTICSEARCH_REFRESH:-wait_for}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-change-me-redis}@redis:6379/0
+  INDEXING_MODE: ${INDEXING_MODE:-sync}
+  RUN_EMBEDDED_WORKER: "false"
+  AUTH_MODE: ${AUTH_MODE:-header}
+  RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+  RATE_LIMIT_REQUESTS_PER_MINUTE: ${RATE_LIMIT_REQUESTS_PER_MINUTE:-600}
+  RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-100}
 
 services:
-  # ========================================================================
-  # Elasticsearch (Primary data store for documents + metadata)
-  # ========================================================================
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
-    container_name: docstore-elasticsearch
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
     environment:
-      - discovery.type=single-node
-      - ELASTIC_PASSWORD=changeme
-      - xpack.security.enabled=true
-      - xpack.security.enrollment.enabled=true
-      - xpack.license.self_generated.type=basic
+      discovery.type: single-node
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-change-me-elastic}
+      xpack.security.enabled: "true"
+      # TLS is terminated at the edge in this local stack; production enables HTTP + transport TLS.
+      xpack.security.http.ssl.enabled: "false"
+      xpack.security.transport.ssl.enabled: "false"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
     volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
+      - esdata:/usr/share/elasticsearch/data
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"
     healthcheck:
-      test: curl -s http://elastic:changeme@elasticsearch:9200 >/dev/null || exit 1
+      test: ["CMD-SHELL", "curl -fsS -u elastic:$${ELASTIC_PASSWORD} 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null || exit 1"]
       interval: 10s
       timeout: 10s
-      retries: 10
-    networks:
-      - docstore-network
+      retries: 30
+      start_period: 30s
     restart: unless-stopped
 
-  # ========================================================================
-  # Redis
-  # ========================================================================
   redis:
-    image: redis:7-alpine
-    container_name: docstore-redis
-    command: redis-server --appendonly yes --requirepass docpass
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+    # volatile-lru: only keys with a TTL (cache, rate-limit buckets) are evictable;
+    # queue streams and generation counters (no TTL) are never evicted.
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --maxmemory 256mb --maxmemory-policy volatile-lru"]
     volumes:
-      - redis_data:/data
+      - redisdata:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "docpass", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - docstore-network
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
-  # ========================================================================
-  # API Service
-  # ========================================================================
   api:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    container_name: docstore-api
+    build: .
+    image: docsearch-api:local
     environment:
-      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
-      ELASTICSEARCH_USERNAME: elastic
-      ELASTICSEARCH_PASSWORD: changeme
-      REDIS_URL: redis://:docpass@redis:6379/0
-      APP_ENV: development
-      LOG_LEVEL: INFO
-      DEBUG: "False"
-    ports:
-      - "8000:8000"
+      <<: *app-env
+      WEB_CONCURRENCY: "2"
+    expose:
+      - "8000"
+    deploy:
+      replicas: 2
     depends_on:
-      elasticsearch:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - docstore-network
+      elasticsearch: { condition: service_healthy }
+      redis: { condition: service_healthy }
     restart: unless-stopped
+
+  indexer:
+    build: .
+    image: docsearch-api:local
+    command: ["python", "-m", "app.workers.indexer"]
+    environment: *app-env
+    depends_on:
+      api: { condition: service_started }
+      elasticsearch: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3).read()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      disable: true
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8000:8080"
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
 
 volumes:
-  elasticsearch_data:
-    driver: local
-  redis_data:
-    driver: local
-
-networks:
-  docstore-network:
-    driver: bridge
+  esdata:
+  redisdata:

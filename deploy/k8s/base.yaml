@@ -1,0 +1,93 @@
+# Shared resources: namespace, configuration, secrets (example values only), service, worker, autoscaling.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: docsearch
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docsearch-config
+  namespace: docsearch
+data:
+  ENVIRONMENT: production
+  LOG_JSON: "true"
+  SEARCH_BACKEND: elasticsearch
+  STATE_BACKEND: redis
+  ELASTICSEARCH_URL: https://elasticsearch.search.svc:9200
+  ELASTICSEARCH_TENANCY: index_per_tenant
+  ELASTICSEARCH_SHARDS: "3"
+  ELASTICSEARCH_REPLICAS: "1"
+  ELASTICSEARCH_REFRESH: "false"
+  INDEXING_MODE: async
+  RUN_EMBEDDED_WORKER: "false"
+  AUTH_MODE: jwt
+  JWT_AUDIENCE: document-search
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "600"
+  RATE_LIMIT_BURST: "100"
+  CORS_ALLOW_ORIGINS: '["https://app.example.com"]'
+---
+# In production these come from a secret manager (External Secrets / Vault / AWS Secrets Manager).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: docsearch-secrets
+  namespace: docsearch
+type: Opaque
+stringData:
+  ELASTICSEARCH_USERNAME: docsearch-app
+  ELASTICSEARCH_PASSWORD: replace-me
+  REDIS_URL: rediss://:replace-me@redis.cache.svc:6380/0
+  JWT_SECRET: replace-me-with-at-least-32-random-characters
+---
+# The Service selector decides which colour receives traffic (see docs/DEPLOYMENT.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: docsearch-api
+  namespace: docsearch
+spec:
+  selector:
+    app: docsearch-api
+    color: blue
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docsearch-indexer
+  namespace: docsearch
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: docsearch-indexer }
+  template:
+    metadata:
+      labels: { app: docsearch-indexer }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001 }
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: indexer
+          image: registry.example.com/docsearch-api:2.0.0
+          command: ["python", "-m", "app.workers.indexer"]
+          envFrom:
+            - configMapRef: { name: docsearch-config }
+            - secretRef: { name: docsearch-secrets }
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: docsearch-api
+  namespace: docsearch
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app: docsearch-api }

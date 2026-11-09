@@ -1,0 +1,137 @@
+{
+  "environment": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 140 Stepping 1, GenuineIntel",
+    "search_backend": "memory",
+    "state_backend": "memory"
+  },
+  "corpus": {
+    "documents": 20000,
+    "tenants": 4
+  },
+  "indexing": {
+    "documents": 20000,
+    "seconds": 7.56,
+    "docs_per_second": 2644
+  },
+  "phases": [
+    {
+      "phase": "cold_search",
+      "requests": 1000,
+      "concurrency": 1,
+      "throughput_rps": 62.7,
+      "p50_ms": 13.12,
+      "p95_ms": 36.33,
+      "p99_ms": 55.91,
+      "max_ms": 105.24,
+      "mean_ms": 15.86,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.001
+    },
+    {
+      "phase": "hot_search",
+      "requests": 2000,
+      "concurrency": 1,
+      "throughput_rps": 200.6,
+      "p50_ms": 3.82,
+      "p95_ms": 11.25,
+      "p99_ms": 24.22,
+      "max_ms": 100.61,
+      "mean_ms": 4.87,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.912
+    },
+    {
+      "phase": "mixed_90_10",
+      "requests": 2000,
+      "concurrency": 1,
+      "throughput_rps": 97.2,
+      "p50_ms": 10.51,
+      "p95_ms": 23.28,
+      "p99_ms": 46.81,
+      "max_ms": 68.47,
+      "mean_ms": 10.22,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.197
+    },
+    {
+      "phase": "cold_search",
+      "requests": 1000,
+      "concurrency": 8,
+      "throughput_rps": 64.1,
+      "p50_ms": 113.12,
+      "p95_ms": 236.08,
+      "p99_ms": 292.03,
+      "max_ms": 392.38,
+      "mean_ms": 124.3,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.0
+    },
+    {
+      "phase": "hot_search",
+      "requests": 2000,
+      "concurrency": 8,
+      "throughput_rps": 366.2,
+      "p50_ms": 10.72,
+      "p95_ms": 82.06,
+      "p99_ms": 150.58,
+      "max_ms": 348.17,
+      "mean_ms": 21.74,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.926
+    },
+    {
+      "phase": "mixed_90_10",
+      "requests": 2000,
+      "concurrency": 8,
+      "throughput_rps": 93.4,
+      "p50_ms": 77.27,
+      "p95_ms": 157.72,
+      "p99_ms": 224.36,
+      "max_ms": 281.67,
+      "mean_ms": 85.43,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.182
+    },
+    {
+      "phase": "cold_search",
+      "requests": 1000,
+      "concurrency": 32,
+      "throughput_rps": 66.9,
+      "p50_ms": 459.36,
+      "p95_ms": 708.97,
+      "p99_ms": 818.22,
+      "max_ms": 1023.3,
+      "mean_ms": 475.1,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.0
+    },
+    {
+      "phase": "hot_search",
+      "requests": 2000,
+      "concurrency": 32,
+      "throughput_rps": 271.5,
+      "p50_ms": 82.37,
+      "p95_ms": 338.21,
+      "p99_ms": 478.36,
+      "max_ms": 1074.77,
+      "mean_ms": 117.36,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.934
+    },
+    {
+      "phase": "mixed_90_10",
+      "requests": 2000,
+      "concurrency": 32,
+      "throughput_rps": 87.7,
+      "p50_ms": 343.96,
+      "p95_ms": 566.49,
+      "p99_ms": 629.19,
+      "max_ms": 676.0,
+      "mean_ms": 359.3,
+      "error_rate": 0.0,
+      "cache_hit_ratio": 0.205
+    }
+  ]
+}
