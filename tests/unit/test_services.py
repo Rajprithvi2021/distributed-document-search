@@ -72,6 +72,43 @@ async def test_stale_results_are_served_when_backend_fails() -> None:
         await service.search("tenant-a", SearchQuery(text="other"))
 
 
+class DelayedVisibilityBackend(InMemorySearchBackend):
+    """Acknowledges writes at once but makes them searchable only on refresh(), like ES with refresh=false."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._unrefreshed: list = []
+
+    async def index(self, document) -> None:
+        self._unrefreshed.append(document)
+
+    async def refresh(self) -> None:
+        for document in self._unrefreshed:
+            await InMemorySearchBackend.index(self, document)
+        self._unrefreshed.clear()
+
+
+async def test_search_is_correct_once_the_refresh_window_passes() -> None:
+    """Regression: a search between the write ack and the ES refresh used to cache the pre-write page
+    under the new generation as fresh for the full 60 s TTL."""
+    clock = FakeClock()
+    backend = DelayedVisibilityBackend()
+    cache = SearchResultCache(MemoryCache(), fresh_ttl_s=60, stale_ttl_s=600, visibility_s=1.5, clock=clock)
+    service = SearchService(backend=backend, cache=cache, max_result_window=1000)
+    query = SearchQuery(text="redis", fuzzy=FuzzyMode.OFF)
+    assert (await service.search("tenant-a", query)).page.total == 0
+
+    await backend.index(make_document("d1", "Redis cache"))  # acknowledged, not yet searchable
+    await cache.invalidate_tenant("tenant-a")  # what DocumentService does after the ack
+    clock.advance(0.3)
+    assert (await service.search("tenant-a", query)).page.total == 0  # inside the ~1 s window: expected
+
+    await backend.refresh()
+    clock.advance(1.5)
+    after = await service.search("tenant-a", query)
+    assert after.page.total == 1 and after.cache == "miss"
+
+
 async def test_deep_pagination_is_rejected() -> None:
     service, _ = search_service(InMemorySearchBackend())
     with pytest.raises(BadRequestError):
@@ -113,6 +150,26 @@ async def test_worker_skips_documents_deleted_while_queued() -> None:
 
     await worker.process_batch(block_ms=0)
     assert await backend.get("tenant-a", "d1") is None
+    assert await queue.depth() == 0
+
+
+async def test_delete_racing_the_bulk_request_does_not_resurrect_the_document() -> None:
+    class DeleteDuringBulk(InMemorySearchBackend):
+        """The DELETE (tombstone, then ES delete) runs while the worker's _bulk is in flight."""
+
+        async def bulk_index(self, documents):
+            for document in documents:
+                await documents_cache.tombstone(document.tenant_id, document.id)
+                await self.delete(document.tenant_id, document.id)  # nothing there yet
+            return await super().bulk_index(documents)
+
+    backend = DeleteDuringBulk()
+    worker, queue, documents_cache, _ = worker_for(backend)
+    await queue.publish([IndexingJob(job_id="j", document=make_document("d1", "Racing"))])
+
+    await worker.process_batch(block_ms=0)
+    assert await backend.get("tenant-a", "d1") is None
+    assert await documents_cache.get("tenant-a", "d1") is None
     assert await queue.depth() == 0
 
 

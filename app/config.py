@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     cache_document_ttl_s: int = Field(default=300, ge=1)
     cache_local_ttl_s: float = Field(default=2.0, ge=0)  # L1 in-process; 0 disables
     cache_local_max_items: int = Field(default=10_000, ge=1)
+    # Max time for an acknowledged write to become searchable (ES refresh_interval + margin).
+    # Search pages computed inside this window after a write stay fresh only until it closes.
+    search_visibility_s: float = Field(default=1.5, ge=0)
 
     # --- Rate limiting (token bucket per tenant) -----------------------------
     rate_limit_enabled: bool = True
@@ -83,6 +86,7 @@ class Settings(BaseSettings):
     retry_attempts: int = Field(default=3, ge=1)
     retry_base_delay_s: float = Field(default=0.05, ge=0)
     retry_max_delay_s: float = Field(default=1.0, ge=0)
+    retry_deadline_s: float = Field(default=3.0, gt=0)  # total budget per call, retries included
 
     # --- Security ------------------------------------------------------------
     auth_mode: Literal["header", "api_key", "jwt"] = "header"

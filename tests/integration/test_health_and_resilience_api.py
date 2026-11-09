@@ -19,7 +19,7 @@ async def test_health_endpoints_when_everything_is_up(client: AsyncClient) -> No
     assert body["dependencies"]["search"]["details"]["circuit"] == "closed"
 
     assert (await client.get("/health/live")).json() == {"status": "alive"}
-    assert (await client.get("/health/ready")).json() == {"ready": True, "status": "healthy"}
+    assert (await client.get("/health/ready")).json() == {"ready": True}
 
     info = (await client.get("/")).json()
     assert info["search_backend"] == "memory" and info["indexing_mode"] == "sync"
@@ -40,14 +40,23 @@ async def test_health_reports_redis_and_queue_when_configured(app_factory: AppFa
     assert degraded.json()["dependencies"]["redis"]["status"] == "down"
 
 
-async def test_search_engine_down_makes_instance_unready(app_factory: AppFactory) -> None:
+async def test_search_engine_down_is_unhealthy_but_replicas_stay_in_rotation(app_factory: AppFactory) -> None:
+    """Readiness must not follow a shared dependency: if every replica went unready during an ES
+    outage, the load balancer would have no endpoints and stale-if-error could never serve."""
     backend = FlakySearchBackend()
     client, _ = await app_factory(search_backend=backend)
     backend.failing = True
     health = await client.get("/health")
-    assert health.status_code == 503 and health.json()["status"] == "unhealthy"
-    assert (await client.get("/health/ready")).status_code == 503
+    assert health.status_code == 503 and health.json()["status"] == "unhealthy"  # monitoring/alerting signal
+    assert (await client.get("/health/ready")).status_code == 200  # keep serving degraded results
     assert (await client.get("/health/live")).status_code == 200  # don't restart: it's the dependency
+
+
+async def test_readiness_fails_while_draining(app_factory: AppFactory) -> None:
+    client, container = await app_factory()
+    container.accepting_traffic = False  # what shutdown() does first
+    response = await client.get("/health/ready")
+    assert response.status_code == 503 and response.json() == {"ready": False}
 
 
 async def test_writes_fail_loudly_when_search_engine_is_down(app_factory: AppFactory) -> None:

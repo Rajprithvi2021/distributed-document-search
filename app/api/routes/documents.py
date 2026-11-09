@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Header, Path, Response, status
 
 from app.api.dependencies import enforce_rate_limit, get_container, require_scope
 from app.api.schemas import (
+    ERROR_RESPONSES,
     BulkCreateRequest,
     BulkCreateResponse,
     DocumentCreateRequest,
@@ -17,17 +18,9 @@ from app.core.security import SCOPE_DOCUMENTS_READ, SCOPE_DOCUMENTS_WRITE, Princ
 from app.services.documents import DocumentInput
 
 DOCUMENT_ID = Path(pattern=r"^[A-Za-z0-9_-]{1,64}$", description="Document ID (UUID)")
-ERRORS = {
-    400: {"model": ErrorResponse, "description": "Missing/invalid tenant"},
-    401: {"model": ErrorResponse, "description": "Missing/invalid credentials (api_key/jwt modes)"},
-    403: {"model": ErrorResponse, "description": "Credentials not valid for tenant, or missing scope"},
-    422: {"model": ErrorResponse, "description": "Validation error"},
-    429: {"model": ErrorResponse, "description": "Tenant rate limit exceeded"},
-    503: {"model": ErrorResponse, "description": "Search engine unavailable"},
-}
 
 router = APIRouter(
-    prefix="/documents", tags=["Documents"], dependencies=[Depends(enforce_rate_limit)], responses=ERRORS
+    prefix="/documents", tags=["Documents"], dependencies=[Depends(enforce_rate_limit)], responses=ERROR_RESPONSES
 )
 
 

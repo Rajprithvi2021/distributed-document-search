@@ -1,5 +1,7 @@
 """The whole application (HTTP → services → Elasticsearch + Redis), as deployed by docker compose."""
 
+import asyncio
+
 import pytest
 from redis.asyncio import Redis
 
@@ -8,6 +10,25 @@ from tests.conftest import AppFactory
 from tests.live.conftest import ES_URL, REDIS_URL, drop_indices, es_settings, unique_prefix
 
 pytestmark = pytest.mark.skipif(not (ES_URL and REDIS_URL), reason="set ES_TEST_URL and REDIS_TEST_URL")
+
+
+async def test_new_documents_become_searchable_after_refresh_without_wait_for(app_factory: AppFactory) -> None:
+    """Production refresh setting (ELASTICSEARCH_REFRESH=false): a search inside the ~1 s refresh window
+    must not pin the pre-write result in the cache for the full TTL."""
+    prefix = unique_prefix()
+    settings = es_settings(prefix, elasticsearch_refresh="false", search_visibility_s=1.5)
+    client, container = await app_factory(container=Container(settings))
+    headers = {"X-Tenant-ID": prefix}
+    try:
+        await client.get("/search", headers=headers, params={"q": "refreshwindow", "fuzzy": "false"})
+        created = await client.post("/documents", headers=headers, json={"title": "Refreshwindow", "content": "x"})
+        assert created.status_code == 201
+        await client.get("/search", headers=headers, params={"q": "refreshwindow", "fuzzy": "false"})  # in window
+        await asyncio.sleep(2.0)
+        after = (await client.get("/search", headers=headers, params={"q": "refreshwindow", "fuzzy": "false"})).json()
+        assert after["total"] == 1, after
+    finally:
+        await drop_indices(container.raw_search_backend, prefix)
 
 
 @pytest.mark.parametrize("indexing_mode", ["sync", "async"])

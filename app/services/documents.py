@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
-from app.cache.stores import DocumentCache, SearchResultCache
-from app.core.errors import ConflictError, DocumentNotFoundError, PayloadTooLargeError
+from app.cache.stores import DocumentCache, IdempotencyRecord, SearchResultCache
+from app.core.errors import ConflictError, DocumentNotFoundError, IdempotencyKeyReusedError, PayloadTooLargeError
 from app.core.security import Principal
 from app.domain.models import BulkItemResult, Document, MetadataValue, utcnow
 from app.queue.base import IndexingJob, IndexingQueue
@@ -25,6 +27,12 @@ class DocumentInput:
     content: str
     tags: list[str]
     metadata: dict[str, MetadataValue]
+
+
+def _fingerprint(data: DocumentInput) -> str:
+    """Hash of the request body: an Idempotency-Key may only be retried with the same payload."""
+    canonical = json.dumps(asdict(data), sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -92,30 +100,34 @@ class DocumentService:
         self, principal: Principal, data: DocumentInput, *, idempotency_key: str | None = None
     ) -> CreateResult:
         document = self._build(principal, data)
+        tenant_id = principal.tenant_id
 
+        fingerprint = ""
         if idempotency_key:
-            previous_id = await self._documents.claim_idempotency_key(principal.tenant_id, idempotency_key, document.id)
-            if previous_id is not None:
-                return await self._replay(principal.tenant_id, previous_id)
+            fingerprint = _fingerprint(data)
+            previous = await self._documents.claim_idempotency_key(tenant_id, idempotency_key, fingerprint)
+            if previous is not None:
+                return self._replay(previous, fingerprint)
 
         try:
             status = await self._store(document)
         except Exception:
             if idempotency_key:  # let the client retry with the same key
-                await self._documents.release_idempotency_key(principal.tenant_id, idempotency_key)
+                await self._documents.release_idempotency_key(tenant_id, idempotency_key)
             raise
+        if idempotency_key:
+            await self._documents.complete_idempotency_key(tenant_id, idempotency_key, fingerprint, document, status)
         logger.info("document_created", extra={"document_id": document.id, "status": status})
         return CreateResult(document=document, status=status)
 
-    async def _replay(self, tenant_id: str, document_id: str) -> CreateResult:
-        try:
-            document, status = await self.get(tenant_id, document_id)
-        except DocumentNotFoundError:
-            raise ConflictError(
-                "A request with this Idempotency-Key is still in progress or failed; retry shortly",
-                details={"document_id": document_id},
-            ) from None
-        return CreateResult(document=document, status=status, replayed=True)
+    @staticmethod
+    def _replay(previous: IdempotencyRecord, fingerprint: str) -> CreateResult:
+        if previous.fingerprint != fingerprint:
+            raise IdempotencyKeyReusedError()
+        if previous.state != "done" or previous.document is None or previous.status is None:
+            raise ConflictError("A request with this Idempotency-Key is still in progress; retry shortly")
+        # The original response, even if the document has since been deleted (same as the first reply).
+        return CreateResult(document=previous.document, status=previous.status, replayed=True)
 
     async def _store(self, document: Document) -> DocumentStatus:
         if self._async:

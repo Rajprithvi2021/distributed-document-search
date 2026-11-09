@@ -2,9 +2,11 @@
 
 ## 1. Local full stack (Docker Compose)
 
+Give Docker at least **4 GB of memory** (Elasticsearch alone runs with a 1 GB heap).
+
 ```bash
-docker compose up --build -d          # gateway :8000 → 2 API replicas → Elasticsearch + Redis, plus indexer
-docker compose ps                     # wait until elasticsearch/redis/api are "healthy"
+docker compose up --build -d --wait   # gateway :8000 → 2 API replicas → Elasticsearch + Redis, plus indexer;
+                                      # --wait returns once every healthcheck passes (first run: ~1–2 min)
 bash scripts/smoke_test.sh            # or: powershell -File scripts\smoke_test.ps1
 ```
 
@@ -12,18 +14,18 @@ bash scripts/smoke_test.sh            # or: powershell -File scripts\smoke_test.
 |---|---|
 | Async indexing (202 + Redis Streams + worker) | `INDEXING_MODE=async docker compose up --build -d` |
 | API-key auth | `AUTH_MODE=api_key API_KEYS='{"key-a":"tenant-a"}' docker compose up -d` (add `API_KEYS` to `x-app-env`) |
-| Benchmark without throttling | `RATE_LIMIT_ENABLED=false docker compose up -d` |
+| Benchmark without throttling | `RATE_LIMIT_ENABLED=false docker compose up -d`, and raise the gateway's per-IP `limit_req` `rate` in `deploy/nginx/nginx.conf` (a load generator is one IP, so the edge limit would otherwise cap it) |
 | More API replicas | `docker compose up -d --scale api=4` (the nginx resolver picks them up within 10 s) |
 | Tear down incl. data | `docker compose down -v` |
 
-Ports are bound to `127.0.0.1` for Elasticsearch (9200) and Redis (6379) so they're never exposed on the LAN. Change the default passwords through `ELASTIC_PASSWORD` / `REDIS_PASSWORD`.
+Ports are bound to `127.0.0.1` for Elasticsearch (9200) and Redis (6379) so they're never exposed on the LAN. Change the default passwords through `ELASTIC_PASSWORD` / `REDIS_PASSWORD`. The gateway serves `/health*`, `/metrics` and the OpenAPI docs only to loopback and private-network clients.
 
 ## 2. Blue-green with Docker Compose (bonus)
 
 `deploy/blue-green/` runs two API colours behind one nginx. `switch.sh` performs a **health-gated** cut-over:
 
-1. polls `api-<target>:8000/health/ready` until it reports ready (aborts with traffic unchanged otherwise);
-2. smoke-tests the target directly with a real search;
+1. polls `api-<target>:8000/health/ready` until the new colour has started (aborts with traffic unchanged otherwise);
+2. smoke-tests the target directly with a real search, which proves its Elasticsearch and Redis connections;
 3. rewrites `upstreams/active.conf` and validates it with `nginx -t` (restores the previous file on failure);
 4. `nginx -s reload` is a graceful reload: in-flight requests finish on the old colour while new requests go to the new one.
 
@@ -58,11 +60,11 @@ Zero-downtime checklist (already in the manifests):
 | Mechanism | Setting |
 |---|---|
 | No capacity dip during rollouts | `maxUnavailable: 0`, `maxSurge: 1` |
-| Traffic only to ready pods | readiness → `/health/ready` (search engine reachable); liveness → `/health/live` |
-| Clean drain | `preStop: sleep 5` (LB deregistration) + uvicorn `--timeout-graceful-shutdown 20` + `terminationGracePeriodSeconds: 30` |
+| Traffic only to ready pods | readiness → `/health/ready`: started and not draining. Deliberately **no** dependency checks: ES and Redis are shared, so a dependency-based probe would pull every pod out at once during an ES outage, and clients would get gateway errors instead of stale results and clean 503s. `/health` (503 when ES is down) feeds monitoring and alerting instead. Liveness → `/health/live` |
+| Clean drain | readiness fails as soon as shutdown starts, then `preStop: sleep 5` (LB deregistration) + uvicorn `--timeout-graceful-shutdown 20` + `terminationGracePeriodSeconds: 30` |
 | Voluntary-disruption floor | `PodDisruptionBudget minAvailable: 2` |
 | AZ failure tolerance | `topologySpreadConstraints` on `topology.kubernetes.io/zone` |
-| Autoscaling | HPA on CPU (65%), 3–30 replicas; scale workers on queue lag with KEDA |
+| Autoscaling | HPA on CPU (65%), 3–30 replicas (in the manifests); scaling workers on queue lag with KEDA is planned, not in the manifests |
 | Least privilege | non-root UID 10001, `readOnlyRootFilesystem`, no privilege escalation |
 
 For progressive delivery, replace the manual selector flip with Argo Rollouts (blue-green or canary with Prometheus-driven automated analysis on 5xx rate and p95 latency).

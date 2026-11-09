@@ -143,6 +143,9 @@ class RetryPolicy:
     attempts: int = 3
     base_delay_s: float = 0.05
     max_delay_s: float = 1.0
+    # Total time budget: no new attempt starts once it is spent, so slow failures (timeouts)
+    # can't multiply into attempts x request_timeout of user-visible latency.
+    deadline_s: float | None = None
 
 
 async def retry_async(
@@ -150,13 +153,15 @@ async def retry_async(
     *,
     policy: RetryPolicy,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
     operation: str = "call",
 ) -> T:
-    """Retry transient failures with exponential backoff and full jitter.
+    """Retry transient failures with exponential backoff and full jitter, within a deadline.
 
     Full jitter (``uniform(0, base * 2**n)``) spreads retries from many clients
     so they don't hit a recovering dependency all at once.
     """
+    started = clock()
     attempt = 1
     while True:
         try:
@@ -168,6 +173,8 @@ async def retry_async(
                 raise
             ceiling = min(policy.max_delay_s, policy.base_delay_s * (2 ** (attempt - 1)))
             delay = random.uniform(0, ceiling)
+            if policy.deadline_s is not None and clock() - started + delay >= policy.deadline_s:
+                raise
             logger.info(
                 "retrying_transient_failure",
                 extra={"operation": operation, "attempt": attempt, "delay_s": round(delay, 4), "error": exc.message},

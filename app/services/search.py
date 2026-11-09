@@ -54,6 +54,8 @@ class SearchService:
                 logger.warning("search_served_stale", extra={"cache_key": lookup.key})
                 return SearchOutcome(page=lookup.page, cache="stale", degraded=True)
             raise
+        if lookup.page is not None:  # expired entry refreshed from the backend
+            CACHE_LOOKUPS.labels(cache="search", result="miss").inc()
         return SearchOutcome(page=page, cache="miss")
 
     async def _execute(self, tenant_id: str, query: SearchQuery, cache_key: str) -> SearchPage:
@@ -61,7 +63,7 @@ class SearchService:
         if query.fuzzy is FuzzyMode.AUTO and page.total == 0:
             # Typo tolerance only when the precise query found nothing.
             page = await self._backend.search(tenant_id, query, fuzzy=True)
-        await self._cache.store(cache_key, page)
+        await self._cache.store(cache_key, page, tenant_id)
         return page
 
     async def _single_flight(self, key: str, factory: Callable[[], Awaitable[SearchPage]]) -> SearchPage:

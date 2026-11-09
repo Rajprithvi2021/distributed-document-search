@@ -3,14 +3,21 @@
 Key design (all keys are tenant-namespaced):
 
     gen:search:{tenant}                  search generation counter (no TTL)
-    search:{tenant}:{gen}:{fingerprint}  cached SearchPage + stored_at
+    genat:search:{tenant}                time of the last generation bump (short TTL)
+    search:{tenant}:{gen}:{fingerprint}  cached SearchPage + stored_at + fresh_until
     doc:{tenant}:{id}                    cached Document + state (indexed | pending)
     tomb:{tenant}:{id}                   delete tombstone (blocks re-index from a stale queue job)
-    idem:{tenant}:{sha256(key)}          Idempotency-Key -> document id
+    idem:{tenant}:{sha256(key)}          Idempotency-Key -> request fingerprint + original response
 
 Invalidation is O(1). A write bumps the tenant's generation, so every older
 search key becomes unreachable and expires on its own TTL. There's no
 ``KEYS``/``SCAN`` and no fan-out delete, and other tenants are untouched.
+
+Visibility race: Elasticsearch makes an acknowledged write searchable only after
+its next refresh (about 1 s). A search that runs inside that window, after the
+bump, would cache the *pre-write* page under the *new* generation. Pages computed
+within ``visibility_s`` of a bump are therefore only fresh until the window closes,
+so staleness stays bounded by the refresh interval instead of the 60 s cache TTL.
 """
 
 from __future__ import annotations
@@ -21,6 +28,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
+
+from pydantic import BaseModel
 
 from app.cache.base import Cache
 from app.core.metrics import CACHE_LOOKUPS
@@ -38,11 +47,21 @@ class SearchLookup:
 
 class SearchResultCache:
     def __init__(
-        self, cache: Cache, *, fresh_ttl_s: float, stale_ttl_s: float, clock: Callable[[], float] = time.time
+        self,
+        cache: Cache,
+        *,
+        fresh_ttl_s: float,
+        stale_ttl_s: float,
+        visibility_s: float = 0.0,
+        shared: Cache | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._cache = cache
+        # The bump timestamp must be read from the shared tier (never an L1 copy) to be correct across replicas.
+        self._shared = shared or cache
         self._fresh_ttl_s = fresh_ttl_s
         self._stale_ttl_s = stale_ttl_s
+        self._visibility_s = visibility_s
         self._clock = clock
 
     async def generation(self, tenant_id: str) -> int:
@@ -51,6 +70,8 @@ class SearchResultCache:
 
     async def invalidate_tenant(self, tenant_id: str) -> None:
         await self._cache.incr(f"gen:search:{tenant_id}")
+        if self._visibility_s > 0:
+            await self._shared.set(f"genat:search:{tenant_id}", repr(self._clock()), max(2 * self._visibility_s, 1.0))
 
     async def lookup(self, tenant_id: str, query: SearchQuery) -> SearchLookup:
         generation = await self.generation(tenant_id)
@@ -60,12 +81,21 @@ class SearchResultCache:
             CACHE_LOOKUPS.labels(cache="search", result="miss").inc()
             return SearchLookup(key=key, page=None, fresh=False)
         envelope = json.loads(raw)
-        fresh = self._clock() - envelope["stored_at"] < self._fresh_ttl_s
-        CACHE_LOOKUPS.labels(cache="search", result="hit" if fresh else "miss").inc()
+        fresh = self._clock() < envelope["fresh_until"]
+        if fresh:
+            CACHE_LOOKUPS.labels(cache="search", result="hit").inc()
+        # An expired entry is counted by the caller: "miss" once refreshed, "stale" if served on error.
         return SearchLookup(key=key, page=SearchPage.model_validate(envelope["page"]), fresh=fresh)
 
-    async def store(self, key: str, page: SearchPage) -> None:
-        envelope = {"stored_at": self._clock(), "page": page.model_dump(mode="json")}
+    async def store(self, key: str, page: SearchPage, tenant_id: str) -> None:
+        now = self._clock()
+        fresh_until = now + self._fresh_ttl_s
+        if self._visibility_s > 0:
+            raw = await self._shared.get(f"genat:search:{tenant_id}")
+            if raw is not None and now - float(raw) < self._visibility_s:
+                # Computed before the latest write may be searchable: fresh only until the window closes.
+                fresh_until = min(fresh_until, float(raw) + self._visibility_s)
+        envelope = {"stored_at": now, "fresh_until": fresh_until, "page": page.model_dump(mode="json")}
         # Kept for the *stale* TTL so it can be served if the backend fails (stale-if-error).
         await self._cache.set(key, json.dumps(envelope, separators=(",", ":")), self._stale_ttl_s)
 
@@ -119,12 +149,31 @@ class DocumentCache:
     def _idempotency_key(tenant_id: str, key: str) -> str:
         return f"idem:{tenant_id}:{hashlib.sha256(key.encode()).hexdigest()}"
 
-    async def claim_idempotency_key(self, tenant_id: str, key: str, document_id: str) -> str | None:
-        """Claim ``key`` for ``document_id``. Returns ``None`` when claimed, otherwise the earlier document id."""
+    async def claim_idempotency_key(self, tenant_id: str, key: str, fingerprint: str) -> IdempotencyRecord | None:
+        """Claim ``key``. Returns ``None`` if this call claimed it, otherwise the earlier request's record."""
         cache_key = self._idempotency_key(tenant_id, key)
-        if await self._cache.add(cache_key, document_id, self.IDEMPOTENCY_TTL_S):
-            return None
-        return await self._cache.get(cache_key)
+        claim = json.dumps({"state": "in_progress", "fingerprint": fingerprint})
+        for _ in range(2):  # second pass only if the record expired between SET NX and GET
+            if await self._cache.add(cache_key, claim, self.IDEMPOTENCY_TTL_S):
+                return None
+            raw = await self._cache.get(cache_key)
+            if raw is not None:
+                return IdempotencyRecord.model_validate_json(raw)
+        return None
+
+    async def complete_idempotency_key(
+        self, tenant_id: str, key: str, fingerprint: str, document: Document, status: DocumentState
+    ) -> None:
+        """Store the original response so retries replay it, even if the document is later deleted."""
+        record = IdempotencyRecord(state="done", fingerprint=fingerprint, status=status, document=document)
+        await self._cache.set(self._idempotency_key(tenant_id, key), record.model_dump_json(), self.IDEMPOTENCY_TTL_S)
 
     async def release_idempotency_key(self, tenant_id: str, key: str) -> None:
         await self._cache.delete(self._idempotency_key(tenant_id, key))
+
+
+class IdempotencyRecord(BaseModel):
+    state: Literal["in_progress", "done"]
+    fingerprint: str
+    status: DocumentState | None = None
+    document: Document | None = None

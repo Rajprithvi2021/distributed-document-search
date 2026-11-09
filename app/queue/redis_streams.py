@@ -10,7 +10,7 @@
 * Poison messages go to a separate dead-letter stream for inspection or replay.
 
 For larger scale the same port maps onto Kafka (partitions keyed by tenant)
-or SQS (visibility timeout + redrive policy). See SUBMISSION.md §1.8.
+or SQS (visibility timeout + redrive policy). See SUBMISSION.md §1.7.
 """
 
 from __future__ import annotations

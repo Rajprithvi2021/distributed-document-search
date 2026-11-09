@@ -92,6 +92,24 @@ async def test_idempotency_key_replays_the_original_document(client: AsyncClient
     assert search.json()["total"] == 2
 
 
+async def test_idempotent_retry_after_delete_replays_the_original_response(client: AsyncClient) -> None:
+    """Regression: a retry with the same key must replay the original 201 body, not 409 for 24 h."""
+    headers = TENANT_A | {"Idempotency-Key": "replay-after-delete"}
+    body = {"title": "Once", "content": "then deleted"}
+    first = await client.post("/documents", headers=headers, json=body)
+    assert (await client.delete(f"/documents/{first.json()['id']}", headers=TENANT_A)).status_code == 204
+    retry = await client.post("/documents", headers=headers, json=body)
+    assert retry.status_code == 200 and retry.json()["id"] == first.json()["id"]
+    assert retry.headers["idempotent-replayed"] == "true"
+
+
+async def test_idempotency_key_reused_with_a_different_body_is_rejected(client: AsyncClient) -> None:
+    headers = TENANT_A | {"Idempotency-Key": "reused-key"}
+    assert (await client.post("/documents", headers=headers, json={"title": "A", "content": "a"})).status_code == 201
+    reused = await client.post("/documents", headers=headers, json={"title": "B", "content": "b"})
+    assert reused.status_code == 422 and reused.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
 async def test_bulk_create_indexes_everything(client: AsyncClient) -> None:
     documents = [{"title": f"Bulk {i}", "content": f"bulk payload number {i}"} for i in range(25)]
     response = await client.post("/documents/bulk", headers=TENANT_A, json={"documents": documents})

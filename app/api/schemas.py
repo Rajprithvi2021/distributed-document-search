@@ -30,6 +30,17 @@ class ErrorResponse(BaseModel):
     error: ErrorBody
 
 
+# Error responses shared by every tenant-scoped route (for the OpenAPI document).
+ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"model": ErrorResponse, "description": "Missing/invalid tenant"},
+    401: {"model": ErrorResponse, "description": "Missing/invalid credentials (api_key/jwt modes)"},
+    403: {"model": ErrorResponse, "description": "Credentials not valid for tenant, or missing scope"},
+    422: {"model": ErrorResponse, "description": "Validation error"},
+    429: {"model": ErrorResponse, "description": "Tenant rate limit exceeded"},
+    503: {"model": ErrorResponse, "description": "Search engine unavailable"},
+}
+
+
 # --- documents ----------------------------------------------------------------
 class DocumentCreateRequest(BaseModel):
     model_config = ConfigDict(

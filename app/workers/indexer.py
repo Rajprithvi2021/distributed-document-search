@@ -6,8 +6,9 @@ independently of the API. Each loop iteration:
 1. pulls up to ``batch_size`` jobs (reclaiming jobs abandoned by crashed workers first);
 2. acks and drops jobs whose document was deleted after it was queued (tombstone);
 3. bulk-indexes the rest in one request;
-4. per item: ack on success, re-queue retryable failures (up to ``max_attempts``),
-   dead-letter permanent failures (e.g. a mapping rejection);
+4. per item: ack on success (re-checking the tombstone, so a delete that raced the bulk
+   request can't resurrect the document), re-queue retryable failures (up to
+   ``max_attempts``), dead-letter permanent failures (e.g. a mapping rejection);
 5. bumps the search-cache generation of every tenant it touched.
 
 If the search engine itself is unavailable, jobs are re-queued **without**
@@ -95,9 +96,18 @@ class IndexingWorker:
         for message, result in zip(live, results, strict=True):
             document = message.job.document
             if result.status == "indexed":
+                touched_tenants.add(document.tenant_id)
+                if await self._documents.is_tombstoned(document.tenant_id, document.id):
+                    # Deleted while the bulk request was in flight. DELETE writes the tombstone *before*
+                    # its own ES delete, so either that delete ran after our write (nothing to do) or we
+                    # see the tombstone here and remove the copy we just wrote. Ack only afterwards: if
+                    # this delete fails, the job stays pending and is reclaimed, never silently dropped.
+                    await self._backend.delete(document.tenant_id, document.id)
+                    await self._queue.ack([message.message_id])
+                    INDEXING_JOBS.labels(status="skipped_deleted").inc()
+                    continue
                 await self._queue.ack([message.message_id])
                 await self._documents.put(document, state="indexed")
-                touched_tenants.add(document.tenant_id)
                 INDEXING_JOBS.labels(status="indexed").inc()
             elif result.retryable and message.job.attempt < self._max_attempts:
                 await self._queue.requeue(message, result.error or "retryable failure", count_attempt=True)
@@ -144,7 +154,7 @@ async def _run_standalone() -> int:
         return 2
 
     container = Container(settings)
-    await container.startup(start_embedded_worker=False)
+    await container.startup(role="worker")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

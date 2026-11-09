@@ -73,7 +73,7 @@ async def test_search_cache_generation_invalidation_and_staleness() -> None:
 
     lookup = await cache.lookup("tenant-a", query)
     assert lookup.page is None
-    await cache.store(lookup.key, SearchPage(total=1))
+    await cache.store(lookup.key, SearchPage(total=1), "tenant-a")
 
     assert (await cache.lookup("tenant-a", query)).fresh
     clock.advance(61)
@@ -83,6 +83,29 @@ async def test_search_cache_generation_invalidation_and_staleness() -> None:
     await cache.invalidate_tenant("tenant-a")
     assert (await cache.lookup("tenant-a", query)).page is None
     assert (await cache.lookup("tenant-b", query)).page is None
+
+
+async def test_pages_cached_inside_the_refresh_window_expire_when_it_closes() -> None:
+    """Regression: with ES refresh=false a write is searchable only ~1 s after its ack. A page computed
+    in that window must not stay fresh for the full 60 s TTL under the new generation."""
+    clock = FakeClock()
+    cache = SearchResultCache(MemoryCache(), fresh_ttl_s=60, stale_ttl_s=600, visibility_s=1.5, clock=clock)
+    query = SearchQuery(text="redis")
+
+    await cache.invalidate_tenant("tenant-a")  # the write was acknowledged
+    clock.advance(0.2)
+    lookup = await cache.lookup("tenant-a", query)
+    await cache.store(lookup.key, SearchPage(total=0), "tenant-a")  # computed before the refresh
+    assert (await cache.lookup("tenant-a", query)).fresh
+
+    clock.advance(1.4)  # 1.6 s after the write: the refresh window has closed
+    assert not (await cache.lookup("tenant-a", query)).fresh
+
+    clock.advance(10)  # pages computed after the window get the normal TTL
+    later = await cache.lookup("tenant-a", query)
+    await cache.store(later.key, SearchPage(total=1), "tenant-a")
+    clock.advance(30)
+    assert (await cache.lookup("tenant-a", query)).fresh
 
 
 def test_query_fingerprint_is_stable_and_sensitive() -> None:
@@ -104,6 +127,11 @@ async def test_document_cache_states_tombstones_and_idempotency() -> None:
     assert await cache.is_tombstoned("tenant-a", "d1")
     assert not await cache.is_tombstoned("tenant-b", "d1")
 
-    assert await cache.claim_idempotency_key("tenant-a", "key-1", "d1") is None
-    assert await cache.claim_idempotency_key("tenant-a", "key-1", "d2") == "d1"
-    assert await cache.claim_idempotency_key("tenant-b", "key-1", "d3") is None
+    assert await cache.claim_idempotency_key("tenant-a", "key-1", "fp-1") is None
+    in_progress = await cache.claim_idempotency_key("tenant-a", "key-1", "fp-1")
+    assert in_progress is not None and in_progress.state == "in_progress"
+    assert await cache.claim_idempotency_key("tenant-b", "key-1", "fp-1") is None  # keys are per tenant
+
+    await cache.complete_idempotency_key("tenant-a", "key-1", "fp-1", document, "indexed")
+    done = await cache.claim_idempotency_key("tenant-a", "key-1", "fp-1")
+    assert done is not None and done.state == "done" and done.document == document and done.status == "indexed"

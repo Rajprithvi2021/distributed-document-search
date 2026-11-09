@@ -25,14 +25,14 @@ async def root(container: Container = Depends(get_container)) -> dict[str, objec
         "state_backend": settings.state_backend,
         "indexing_mode": settings.indexing_mode,
         "auth_mode": settings.auth_mode,
-        "docs": "/docs" if settings.enable_docs else None,
+        "docs": "/docs" if settings.enable_docs and not settings.is_production else None,
     }
 
 
 @router.get(
     "/health",
     response_model=HealthResponse,
-    summary="Health check with dependency status",
+    summary="Health check with dependency status (for monitoring and alerting)",
     responses={503: {"model": HealthResponse, "description": "A critical dependency is down"}},
 )
 async def health(container: Container = Depends(get_container)) -> JSONResponse:
@@ -49,7 +49,7 @@ async def health(container: Container = Depends(get_container)) -> JSONResponse:
             for dep in report.dependencies
         },
     )
-    return JSONResponse(status_code=200 if report.ready else 503, content=body.model_dump(mode="json"))
+    return JSONResponse(status_code=200 if report.critical_ok else 503, content=body.model_dump(mode="json"))
 
 
 @router.get("/health/live", summary="Liveness probe (process is up; no dependency checks)")
@@ -57,13 +57,13 @@ async def live() -> dict[str, str]:
     return {"status": "alive"}
 
 
-@router.get("/health/ready", summary="Readiness probe (critical dependencies reachable)")
+@router.get("/health/ready", summary="Readiness probe (started and not draining; no shared-dependency checks)")
 async def ready(container: Container = Depends(get_container)) -> JSONResponse:
-    report = await container.health.check()
-    return JSONResponse(
-        status_code=200 if report.ready else 503,
-        content={"ready": report.ready, "status": report.status},
-    )
+    # Shared dependencies are deliberately excluded: if Elasticsearch is down, every replica would fail
+    # readiness together and the load balancer would have nothing left to route to, so the degraded
+    # (stale-if-error) mode could never serve. Dependency state is reported by /health instead.
+    ready = container.accepting_traffic
+    return JSONResponse(status_code=200 if ready else 503, content={"ready": ready})
 
 
 @router.get("/metrics", summary="Prometheus metrics", response_class=Response)

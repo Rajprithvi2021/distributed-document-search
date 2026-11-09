@@ -1,23 +1,24 @@
 # Distributed Document Search Service
 
+[![ci](https://github.com/Rajprithvi2021/distributed-document-search/actions/workflows/ci.yml/badge.svg)](https://github.com/Rajprithvi2021/distributed-document-search/actions/workflows/ci.yml)
+
 Multi-tenant full-text search API: **FastAPI + Elasticsearch + Redis**, built to show enterprise patterns such as tenant isolation, layered caching, per-tenant rate limiting, async indexing through a queue, circuit breakers and zero-downtime deployment.
 
 > 📄 **Reviewers: start with [`SUBMISSION.md`](SUBMISSION.md).** It is the single document with the architecture design, production-readiness analysis, experience showcase and AI-usage note.
-> The gap analysis of the original prototype and the build plan are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
 | | |
 |---|---|
 | Required endpoints | `POST /documents` · `GET /search?q=&tenant=` · `GET /documents/{id}` · `DELETE /documents/{id}` · `GET /health` |
 | Extras | bulk indexing, async indexing (202 + Redis Streams + worker + DLQ), fuzzy / faceted / highlighted search, idempotency keys, API-key & JWT auth with scopes, Prometheus metrics, readiness/liveness |
-| Quality | 161 tests (unit + HTTP integration), **94% coverage**, ruff-clean; plus 17 live tests against real Elasticsearch/Redis (all passing); verified as a 2-replica deployment behind nginx, including failover and a zero-downtime blue-green switch; CI runs the tests and the full `docker compose` stack end to end |
+| Quality | 169 tests (unit + HTTP integration), **94% coverage**, ruff-clean; plus 18 live tests against real Elasticsearch 8.15 and Redis (all passing); verified as a 2-replica deployment behind nginx, including failover and a zero-downtime blue-green switch; CI runs the tests and the full `docker compose` stack end to end |
 | Docs | [Submission (architecture, production readiness)](SUBMISSION.md) · [Extended architecture & decision records](docs/ARCHITECTURE.md) · [API reference](docs/API.md) · [Benchmarks](docs/BENCHMARKS.md) · [Deployment & blue-green](docs/DEPLOYMENT.md) |
 
 ## Quick start
 
-**Option A: full stack (Docker).** nginx gateway → 2 API replicas → Elasticsearch 8 + Redis 7, plus an indexing worker.
+**Option A: full stack (Docker).** nginx gateway → 2 API replicas → Elasticsearch 8 + Redis 7, plus an indexing worker. Give Docker at least 4 GB of memory (Elasticsearch runs with a 1 GB heap).
 
 ```bash
-docker compose up --build -d
+docker compose up --build -d --wait   # returns when every healthcheck passes (first run: ~1–2 min)
 curl http://localhost:8000/health
 bash scripts/smoke_test.sh            # Windows: powershell -File scripts\smoke_test.ps1
 ```
@@ -33,12 +34,13 @@ uvicorn app.main:app --reload                      # http://localhost:8000/docs
 **Run the tests**
 
 ```bash
-pytest                                  # 161 tests, ~5 s, no Docker needed (live tests auto-skip)
+pytest                                  # 169 tests, ~10 s, no Docker needed (live tests auto-skip)
 pytest --cov=app --cov-report=term      # coverage
 ruff check app tests scripts            # lint
 
-# live tests against real engines (e.g. the compose stack's ES/Redis with security off, or CI services)
-ES_TEST_URL=http://localhost:9200 REDIS_TEST_URL=redis://localhost:6379/0 pytest tests/live -v
+# live tests against the running compose stack's Elasticsearch and Redis (default passwords shown)
+ES_TEST_URL=http://localhost:9200 ES_TEST_USERNAME=elastic ES_TEST_PASSWORD=change-me-elastic \
+REDIS_TEST_URL=redis://:change-me-redis@localhost:6379/0 pytest tests/live -v
 ```
 
 ## Try it
@@ -86,11 +88,11 @@ Key behaviours, each covered by tests:
 | Concern | Behaviour |
 |---|---|
 | Tenant isolation | Tenant validated (`^[a-z0-9][a-z0-9_-]{0,62}$`) and applied to index/alias, query filter, GET verification, cache keys and rate-limit buckets |
-| Writes | Never acknowledged unless stored (503 otherwise); `Idempotency-Key` replays; async mode returns 202 and is readable by id immediately |
+| Writes | Never acknowledged unless stored (503 otherwise); `Idempotency-Key` replays the original response (a different body with the same key is 422); async mode returns 202 and is readable by id immediately; a delete can't be undone by a queued or in-flight index job |
 | Search | BM25, `title^2`, phrase boost, filters, sort, facets, HTML-safe highlights, `fuzzy=auto`, deep-paging guard |
-| Caching | L1 (2 s) → Redis L2; O(1) per-tenant invalidation via generation counters; single-flight; stale-if-error |
-| Rate limiting | Per-tenant token bucket (burst + sustained), atomic in Redis, per-tenant overrides, local fallback if Redis is down |
-| Failure handling | Circuit breakers + jittered retries; Redis outage → still serving; ES outage → stale results or a clean 503; `/health` → 503 for readiness |
+| Caching | L1 (2 s) → Redis L2; O(1) per-tenant invalidation via generation counters; results computed inside the ≈ 1 s refresh window are never cached for the full TTL; single-flight; stale-if-error |
+| Rate limiting | Per-tenant token bucket (burst + sustained), atomic in Redis on the Redis server clock, per-tenant overrides, local fallback if Redis is down |
+| Failure handling | Circuit breakers + jittered retries under a 3 s deadline; Redis outage → still serving; ES outage → stale results or a clean 503, `/health` → 503 for alerting while `/health/ready` keeps replicas in rotation |
 
 ## Configuration
 
@@ -106,10 +108,12 @@ All settings are environment variables (see [`.env.example`](.env.example) and `
 | `AUTH_MODE` | `header` | `header` · `api_key` (`API_KEYS`) · `jwt` (`JWT_SECRET`) |
 | `RATE_LIMIT_REQUESTS_PER_MINUTE` / `RATE_LIMIT_BURST` | 600 / 100 | per tenant; `RATE_LIMIT_OVERRIDES='{"tenant":rpm}'` |
 | `CACHE_SEARCH_TTL_S` / `CACHE_SEARCH_STALE_TTL_S` / `CACHE_LOCAL_TTL_S` | 60 / 600 / 2 | |
+| `SEARCH_VISIBILITY_S` | 1.5 | refresh window after a write during which new pages are cached only until it closes |
+| `RETRY_DEADLINE_S` | 3.0 | total retry budget per dependency call |
 
 ## Benchmarks (from this prototype)
 
-One API process against **real Elasticsearch 8.15.3**, all on one laptop (i5-1135G7). Full method, the in-memory comparison and an outage/recovery test are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+One API process against **real Elasticsearch 8.15.3**, all on one laptop (i5-1135G7), in-process state. Full method, the Redis-state run, the in-memory comparison and an outage/recovery test are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 | Workload (concurrency 8) | req/s | p50 | p95 | cache hit |
 |---|---:|---:|---:|---:|
@@ -117,4 +121,4 @@ One API process against **real Elasticsearch 8.15.3**, all on one laptop (i5-113
 | Popular-query search | 752 | 8 ms | 25 ms | 93% |
 | Bulk indexing | 1,070 docs/s | | | |
 
-p95 stays under 500 ms at concurrency 1, 8 and 32, with 0 errors in 15,000 requests.
+p95 stays under 500 ms at concurrency 1, 8 and 32 in this run, with 0 errors in 15,000 requests. Redis-backed state (the deployed configuration) costs ≈ 8–18% of throughput in an interleaved A/B; capacity planning discounts for it.

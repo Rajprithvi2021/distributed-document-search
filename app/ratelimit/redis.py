@@ -13,7 +13,6 @@ would both be worse.
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
 
 from redis.asyncio import Redis
@@ -34,6 +33,11 @@ local capacity = tonumber(ARGV[1])
 local refill_per_ms = tonumber(ARGV[2])
 local now_ms = tonumber(ARGV[3])
 local cost = tonumber(ARGV[4])
+if now_ms == nil then
+  -- Use the Redis server clock so API replicas with skewed clocks share one consistent timeline.
+  local t = redis.call('TIME')
+  now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+end
 
 local state = redis.call('HMGET', key, 'tokens', 'ts')
 local tokens = tonumber(state[1])
@@ -66,20 +70,21 @@ class RedisTokenBucket:
         *,
         breaker: CircuitBreaker,
         fallback: InMemoryTokenBucket | None = None,
-        clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+        clock_ms: Callable[[], int] | None = None,
         key_prefix: str = "rl:",
     ) -> None:
         self._script = client.register_script(TOKEN_BUCKET_LUA)
         self._breaker = breaker
         self._fallback = fallback or InMemoryTokenBucket()
-        self._clock_ms = clock_ms
+        self._clock_ms = clock_ms  # None (production): Redis TIME; tests inject a deterministic clock
         self._prefix = key_prefix
 
     async def _eval(self, key: str, bucket: BucketConfig, cost: int) -> RateLimitDecision:
+        now = self._clock_ms() if self._clock_ms is not None else ""
         try:
             allowed, tokens = await self._script(
                 keys=[f"{self._prefix}{key}"],
-                args=[bucket.capacity, bucket.refill_per_s / 1000.0, self._clock_ms(), cost],
+                args=[bucket.capacity, bucket.refill_per_s / 1000.0, now, cost],
             )
         except RedisError as exc:
             raise redis_unavailable(exc) from exc

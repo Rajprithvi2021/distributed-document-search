@@ -3,8 +3,9 @@
 * ``healthy``: every dependency is up.
 * ``degraded``: a non-critical dependency (cache / rate-limit store / queue)
   is down. The service still answers correctly, just slower or less precisely.
-* ``unhealthy``: a critical dependency (the search engine) is down. Readiness
-  fails so the load balancer stops routing traffic to this instance.
+* ``unhealthy``: a critical dependency (the search engine) is down. ``/health``
+  returns 503 for monitoring and alerting. Readiness is *not* tied to it (see
+  ``/health/ready``): replicas stay in rotation to serve cached results and clean 503s.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ class HealthReport:
     checked_at: object = field(default_factory=utcnow)
 
     @property
-    def ready(self) -> bool:
+    def critical_ok(self) -> bool:
         return self.status != "unhealthy"
 
 

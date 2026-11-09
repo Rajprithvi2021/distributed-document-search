@@ -83,6 +83,12 @@ class ConflictError(AppError):
     default_message = "The request conflicts with the current state"
 
 
+class IdempotencyKeyReusedError(AppError):
+    status_code = 422
+    code = "IDEMPOTENCY_KEY_REUSED"
+    default_message = "This Idempotency-Key was already used with a different request body"
+
+
 class PayloadTooLargeError(AppError):
     status_code = 413
     code = "PAYLOAD_TOO_LARGE"

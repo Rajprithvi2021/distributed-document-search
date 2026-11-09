@@ -20,7 +20,8 @@ COPY app ./app
 USER app
 EXPOSE 8000
 
-# Liveness only: dependency health is the orchestrator's readiness concern (/health/ready).
+# Liveness only. Orchestrators probe readiness on /health/ready (started, not draining);
+# dependency health is reported by /health for monitoring.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2).status == 200 else 1)"]
 

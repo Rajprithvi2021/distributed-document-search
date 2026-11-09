@@ -1,6 +1,7 @@
 import fakeredis
 import pytest
 
+from app.core.metrics import RATE_LIMIT_FALLBACK
 from app.core.resilience import BreakerState, CircuitBreaker
 from app.ratelimit.base import BucketConfig, TenantRateLimitPolicy
 from app.ratelimit.memory import InMemoryTokenBucket
@@ -59,6 +60,15 @@ async def test_redis_lua_bucket_is_shared_across_replicas() -> None:
     now[0] += 1500  # 1.5 s -> 1.5 tokens
     assert (await replica_1.acquire("t", BUCKET)).allowed
     assert not (await replica_2.acquire("t", BUCKET)).allowed
+
+
+async def test_redis_bucket_uses_the_redis_server_clock_by_default() -> None:
+    """No app clock injected: the Lua script reads Redis TIME, so replica clock skew can't distort limits."""
+    fallback_before = RATE_LIMIT_FALLBACK._value.get()
+    limiter = RedisTokenBucket(fake_redis(), breaker=CircuitBreaker("redis"))
+    decisions = [await limiter.acquire("t", BUCKET) for _ in range(4)]
+    assert [d.allowed for d in decisions] == [True, True, True, False]
+    assert RATE_LIMIT_FALLBACK._value.get() == fallback_before  # decided in Redis, not by the local fallback
 
 
 async def test_redis_outage_falls_back_to_local_bucket_and_opens_circuit() -> None:

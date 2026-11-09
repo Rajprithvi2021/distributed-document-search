@@ -10,8 +10,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import enforce_rate_limit, get_container, require_scope
-from app.api.routes.documents import ERRORS
-from app.api.schemas import SearchResponse
+from app.api.schemas import ERROR_RESPONSES, SearchResponse
 from app.container import Container
 from app.core.errors import ValidationFailedError
 from app.core.security import SCOPE_SEARCH, Principal
@@ -21,7 +20,7 @@ FILTER_KEY = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_FACETS = 5
 MAX_FILTERS = 10
 
-router = APIRouter(tags=["Search"], dependencies=[Depends(enforce_rate_limit)], responses=ERRORS)
+router = APIRouter(tags=["Search"], dependencies=[Depends(enforce_rate_limit)], responses=ERROR_RESPONSES)
 
 
 def _parse_filters(raw: list[str]) -> tuple[tuple[str, str], ...]:
@@ -54,9 +53,6 @@ def _parse_facets(raw: str | None) -> tuple[str, ...]:
 @router.get("/search", response_model=SearchResponse, summary="Search documents")
 async def search_documents(
     q: str = Query(min_length=1, max_length=512, description="Full-text query"),
-    tenant: str | None = Query(
-        default=None, description="Tenant ID. Alternative to the X-Tenant-ID header (assignment contract)"
-    ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
     sort: SortOrder = Query(default=SortOrder.RELEVANCE),

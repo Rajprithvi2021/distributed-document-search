@@ -29,16 +29,16 @@ requires_redis = pytest.mark.skipif(not REDIS_URL, reason="set REDIS_TEST_URL to
 
 
 def es_settings(prefix: str, tenancy: str = "index_per_tenant", **overrides) -> Settings:
-    return make_settings(
-        search_backend="elasticsearch",
-        elasticsearch_url=ES_URL,
-        elasticsearch_username=os.environ.get("ES_TEST_USERNAME"),
-        elasticsearch_password=os.environ.get("ES_TEST_PASSWORD"),
-        elasticsearch_index_prefix=prefix,
-        elasticsearch_tenancy=tenancy,
-        elasticsearch_refresh="wait_for",  # deterministic visibility for assertions
-        **overrides,
-    )
+    values = {
+        "search_backend": "elasticsearch",
+        "elasticsearch_url": ES_URL,
+        "elasticsearch_username": os.environ.get("ES_TEST_USERNAME"),
+        "elasticsearch_password": os.environ.get("ES_TEST_PASSWORD"),
+        "elasticsearch_index_prefix": prefix,
+        "elasticsearch_tenancy": tenancy,
+        "elasticsearch_refresh": "wait_for",  # deterministic visibility for assertions (overridable)
+    }
+    return make_settings(**(values | overrides))
 
 
 def unique_prefix() -> str:

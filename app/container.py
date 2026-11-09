@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Literal
 
 from redis.asyncio import Redis
 
@@ -122,12 +123,21 @@ class Container:
         self.search_backend = ResilientSearchBackend(
             search_backend,
             self.search_breaker,
-            RetryPolicy(settings.retry_attempts, settings.retry_base_delay_s, settings.retry_max_delay_s),
+            RetryPolicy(
+                settings.retry_attempts,
+                settings.retry_base_delay_s,
+                settings.retry_max_delay_s,
+                deadline_s=settings.retry_deadline_s,
+            ),
         )
 
         # --- services ---------------------------------------------------------
         self.search_cache = SearchResultCache(
-            self.cache, fresh_ttl_s=settings.cache_search_ttl_s, stale_ttl_s=settings.cache_search_stale_ttl_s
+            self.cache,
+            shared=self.shared_cache,
+            fresh_ttl_s=settings.cache_search_ttl_s,
+            stale_ttl_s=settings.cache_search_stale_ttl_s,
+            visibility_s=0.0 if settings.elasticsearch_refresh == "wait_for" else settings.search_visibility_s,
         )
         self.document_cache = DocumentCache(self.shared_cache, ttl_s=settings.cache_document_ttl_s)
         self.authenticator = Authenticator(settings)
@@ -155,6 +165,10 @@ class Container:
         self.health = HealthService(self._health_checks())
         self._stop = asyncio.Event()
         self._worker_task: asyncio.Task[None] | None = None
+        # Readiness is local: true between start-up and the start of shutdown (draining). It deliberately
+        # ignores shared dependencies, so an Elasticsearch outage doesn't pull every replica out of the
+        # load balancer at once; replicas keep serving cached (degraded) results and clear 503s instead.
+        self.accepting_traffic = False
 
     # -- health ---------------------------------------------------------------
     def _health_checks(self) -> dict:
@@ -195,20 +209,22 @@ class Container:
         )
 
     # -- lifecycle -----------------------------------------------------------
-    async def startup(self, *, start_embedded_worker: bool | None = None) -> None:
+    async def startup(self, *, role: Literal["api", "worker"] = "api") -> None:
+        """Start the process. ``role="worker"`` is the standalone indexer (python -m app.workers.indexer)."""
         await self.search_backend.startup()
-        if self.settings.indexing_mode == "async" or start_embedded_worker is False:
+        if role == "worker" or self.settings.indexing_mode == "async":
             try:
                 await self.queue.setup()
             except Exception as exc:  # Redis may still be starting; the worker retries on consume
                 logger.warning("queue_setup_deferred", extra={"error": str(exc)})
 
-        run_worker = self.settings.run_embedded_worker if start_embedded_worker is None else start_embedded_worker
-        if self.settings.indexing_mode == "async" and run_worker:
+        if role == "api" and self.settings.indexing_mode == "async" and self.settings.run_embedded_worker:
             self._worker_task = asyncio.create_task(self.worker.run(self._stop), name="embedded-indexer")
+        self.accepting_traffic = True
         logger.info(
             "container_started",
             extra={
+                "role": role,
                 "search_backend": self.raw_search_backend.name,
                 "state_backend": self.settings.state_backend,
                 "indexing_mode": self.settings.indexing_mode,
@@ -217,6 +233,7 @@ class Container:
         )
 
     async def shutdown(self) -> None:
+        self.accepting_traffic = False  # readiness fails first, so the load balancer drains this replica
         self._stop.set()
         if self._worker_task is not None:
             try:

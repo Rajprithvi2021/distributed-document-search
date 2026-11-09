@@ -16,7 +16,8 @@ data:
   STATE_BACKEND: redis
   ELASTICSEARCH_URL: https://elasticsearch.search.svc:9200
   ELASTICSEARCH_TENANCY: index_per_tenant
-  ELASTICSEARCH_SHARDS: "3"
+  ELASTICSEARCH_SHARDS: "1"     # per-tenant index; large tenants get dedicated multi-shard indices
+  SEARCH_VISIBILITY_S: "1.5"    # ES refresh interval (1 s) + margin
   ELASTICSEARCH_REPLICAS: "1"
   ELASTICSEARCH_REFRESH: "false"
   INDEXING_MODE: async

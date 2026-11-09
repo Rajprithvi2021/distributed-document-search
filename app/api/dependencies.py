@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from collections.abc import Awaitable, Callable
 
-from fastapi import Depends, Request, Response
+from fastapi import Depends, Header, Query, Request, Response
 
 from app.container import Container
 from app.core.errors import PermissionDeniedError, RateLimitExceededError
@@ -22,7 +22,14 @@ def get_container(request: Request) -> Container:
     return request.app.state.container
 
 
-async def get_principal(request: Request, container: Container = Depends(get_container)) -> Principal:
+async def get_principal(
+    request: Request,
+    container: Container = Depends(get_container),
+    # Declared here so every tenant-scoped endpoint documents both options in OpenAPI. Resolution itself
+    # (including the api_key / jwt modes and the legacy tenant_id parameter) happens in Authenticator.
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID", description="Tenant ID (AUTH_MODE=header)"),
+    tenant: str | None = Query(default=None, description="Tenant ID; alternative to the X-Tenant-ID header"),
+) -> Principal:
     principal = container.authenticator.authenticate(request.headers, request.query_params)
     tenant_id_var.set(principal.tenant_id)
     request.state.tenant_id = principal.tenant_id  # read by the access-log middleware

@@ -26,7 +26,7 @@ Interactive OpenAPI docs: `http://localhost:8000/docs` (disabled when `ENVIRONME
 | `tags` | string[] | optional, ≤ 50, each `[\w.:-]{1,64}`, lowercased and de-duplicated |
 | `metadata` | object | optional, ≤ 50 keys `[A-Za-z0-9_-]{1,64}`; values string/number/bool or lists of them |
 
-Header `Idempotency-Key` (optional, ≤ 128 chars): retries with the same key return the original document with `200` and `Idempotent-Replayed: true`.
+Header `Idempotency-Key` (optional, ≤ 128 chars, scoped to the tenant, remembered 24 h): a retry with the same key and the same body replays the original response (same document and status) with `200` and `Idempotent-Replayed: true`, even if the document was deleted since. The same key with a different body is `422 IDEMPOTENCY_KEY_REUSED`. While Redis is unavailable keys can't be recorded, so de-duplication is best-effort.
 
 Responses: `201` (indexed, `Location` header) · `202` (async mode, `status: "pending"`) · `200` (replay) · `409` (same key still in progress) · `413` · `422` · `429` · `503`.
 
@@ -91,11 +91,13 @@ Responses: `201` (indexed, `Location` header) · `202` (async mode, `status: "pe
 
 | Endpoint | Purpose | Codes |
 |---|---|---|
-| `GET /health` | Per-dependency status, latency, circuit state; `healthy` / `degraded` (non-critical down) / `unhealthy` (search down) | 200 · 503 |
+| `GET /health` | Per-dependency status, latency, circuit state; `healthy` / `degraded` (non-critical down) / `unhealthy` (search down). For monitoring and alerting | 200 · 503 |
 | `GET /health/live` | Liveness: the process is up, no dependency calls | 200 |
-| `GET /health/ready` | Readiness: the critical dependency (search) is reachable | 200 · 503 |
+| `GET /health/ready` | Readiness: started and not draining (`{"ready": true}`). No shared-dependency checks, so an ES outage doesn't empty the load balancer | 200 · 503 |
 | `GET /metrics` | Prometheus exposition | 200 |
 | `GET /` | Service info and active adapters | 200 |
+
+Behind the compose/nginx gateway, `/health*`, `/metrics` and `/docs` are served only to loopback and private-network clients.
 
 ## Error codes
 
@@ -108,7 +110,7 @@ Responses: `201` (indexed, `Location` header) · `202` (async mode, `status: "pe
 | 405 | `METHOD_NOT_ALLOWED` | |
 | 409 | `CONFLICT` | Idempotency-Key in progress |
 | 413 | `PAYLOAD_TOO_LARGE` | body > `MAX_REQUEST_BYTES` or document > `MAX_DOCUMENT_BYTES` |
-| 422 | `VALIDATION_ERROR` | schema/parameter validation; `details[]` lists `location`, `message`, `type` |
+| 422 | `VALIDATION_ERROR` · `IDEMPOTENCY_KEY_REUSED` | schema/parameter validation (`details[]` lists `location`, `message`, `type`) · an Idempotency-Key reused with a different body |
 | 429 | `RATE_LIMIT_EXCEEDED` | tenant bucket empty; honour `Retry-After` |
 | 500 | `INTERNAL_ERROR` | unexpected; quote `request_id` to support |
 | 503 | `SERVICE_UNAVAILABLE` | search engine unreachable or circuit open (`Retry-After` when open) |

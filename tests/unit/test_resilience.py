@@ -130,5 +130,23 @@ async def test_retry_gives_up_and_never_retries_open_circuits_or_caller_errors()
     assert calls == 2
 
 
+async def test_retry_stops_when_the_deadline_is_spent() -> None:
+    """Slow failures (timeouts) must not multiply into attempts x request timeout of latency."""
+    clock = FakeClock(start=0.0)
+    calls = 0
+
+    async def slow_failure() -> None:
+        nonlocal calls
+        calls += 1
+        clock.advance(0.6)  # e.g. a request that timed out
+        raise DependencyUnavailableError("timeout")
+
+    with pytest.raises(DependencyUnavailableError):
+        await retry_async(
+            slow_failure, policy=RetryPolicy(attempts=10, base_delay_s=0, deadline_s=1.0), sleep=_no_sleep, clock=clock
+        )
+    assert calls == 2
+
+
 async def _no_sleep(_: float) -> None:
     return None
