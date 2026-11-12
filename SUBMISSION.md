@@ -1,6 +1,6 @@
 # Distributed Document Search Service: Technical Assessment Submission
 
-**Candidate:** _[your name]_ · **Repository:** [github.com/Rajprithvi2021/distributed-document-search](https://github.com/Rajprithvi2021/distributed-document-search) · **Stack:** Python 3.12 · FastAPI · Elasticsearch 8 · Redis 7 · Docker Compose · Kubernetes manifests
+**Candidate:** _Prithvi Raj Kumar_ · **Repository:** [github.com/Rajprithvi2021/distributed-document-search](https://github.com/Rajprithvi2021/distributed-document-search) · **Stack:** Python 3.12 · FastAPI · Elasticsearch 8 · Redis 7 · Docker Compose · Kubernetes manifests
 
 | Deliverable | Where |
 |---|---|
